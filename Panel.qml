@@ -294,7 +294,7 @@ Panel {
 
     // GPU mode is derived from the mux/dgpu pair rather than stored, so it
     // can never drift out of sync with what the firmware actually reports.
-    readonly property string gpuMode: Model.gpuModeId(gpuMux, dgpuDisable)
+    readonly property string gpuMode: Model.gpuModeId(gpuMux, dgpuDisable, armourySupported.gpuMux)
     readonly property bool hasGpuMode: armourySupported.gpuMux || armourySupported.dgpuDisable
 
     readonly property bool showBatteryLimit: setting("showBatteryLimit", true) === true

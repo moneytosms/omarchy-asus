@@ -294,8 +294,16 @@ Panel {
 
     // GPU mode is derived from the mux/dgpu pair rather than stored, so it
     // can never drift out of sync with what the firmware actually reports.
-    readonly property string gpuMode: Model.gpuModeId(gpuMux, dgpuDisable)
+    readonly property string gpuMode: Model.gpuModeId(gpuMux, dgpuDisable, armourySupported.gpuMux)
     readonly property bool hasGpuMode: armourySupported.gpuMux || armourySupported.dgpuDisable
+
+    // What asusd has queued for the next boot, and the mode that lands the
+    // laptop in — "" when nothing is pending. Both GPU attributes only take
+    // effect at boot, so without this the row reads as if the click failed.
+    property var queuedGpu: ({ gpu_mux_mode: -1, dgpu_disable: -1 })
+    readonly property string pendingGpuMode: Model.pendingGpuModeId(gpuMux, dgpuDisable, armourySupported.gpuMux, queuedGpu)
+    // Same amber the temperature ramp uses for "warm" — a caution, not an error.
+    readonly property color pendingColor: "#ffcc44"
 
     readonly property bool showBatteryLimit: setting("showBatteryLimit", true) === true
     readonly property int refreshInterval: Math.max(5, Math.min(60, Number(setting("refreshIntervalSec", 10)) || 10)) * 1000
@@ -307,6 +315,7 @@ Panel {
         if (supported.hasBattery && !batteryProc.running) batteryProc.running = true
         if (!ledProc.running) ledProc.running = true
         if (!armouryProc.running) armouryProc.running = true
+        if (!queuedGpuProc.running) queuedGpuProc.running = true
         if (!monitorProc.running) monitorProc.running = true
         if (hyprmoncfgAvailable && !hyprmoncfgProc.running) hyprmoncfgProc.running = true
         if (supported.hasFanCurve) { if (!fanDetailProc.running) fanDetailProc.running = true }
@@ -379,17 +388,17 @@ Panel {
     // GPU mode — Eco/Standard/Ultimate collapse to the mux + dgpu_disable
     // pair. Only the attribute that actually changes is written, so an Eco
     // switch on a mux-less laptop is still a single valid call.
+    // The live gpuMux/dgpuDisable values are deliberately not updated here:
+    // they mirror what the firmware is running, which a queued write does not
+    // change until the next boot. The queued read that follows the write is
+    // what moves the pending marker, so the row never claims a switch that
+    // has not happened.
     function setGpuMode(id) {
-        var def = Model.gpuModeDef(id)
-        if (armourySupported.gpuMux && (def.mux === 1) !== gpuMux) {
-            gpuMux = def.mux === 1
-            setArmouryAttr("gpu_mux_mode", def.mux)
-            return
-        }
-        if (armourySupported.dgpuDisable && (def.dgpuDisable === 1) !== dgpuDisable) {
-            dgpuDisable = def.dgpuDisable === 1
-            setArmouryAttr("dgpu_disable", def.dgpuDisable)
-        }
+        if (actionProc.running) return
+        var cmd = Model.gpuModeCommand(Model.gpuModeDef(id), queuedGpu, gpuMux, dgpuDisable, armourySupported)
+        if (!cmd) return
+        actionProc.command = cmd
+        actionProc.running = true
     }
 
     // Applying a refresh rate is two steps where hyprmoncfg is managing
@@ -571,12 +580,40 @@ Panel {
                                     horizontalPadding: Style.spacing.controlPaddingX
                                     verticalPadding: Style.spacing.controlPaddingY
                                     bordered: true
-                                    active: root.gpuMode === modelData.id
+                                    // A queued mode is highlighted alongside the
+                                    // active one, so the click leaves a visible
+                                    // mark instead of appearing to do nothing.
+                                    active: root.gpuMode === modelData.id || root.pendingGpuMode === modelData.id
                                     onClicked: root.setGpuMode(modelData.id)
                                 }
                             }
                         }
                         Text { width: parent.width; text: Model.gpuModeDef(root.gpuMode).desc; wrapMode: Text.WordWrap; color: Qt.darker(root.bar.foreground, 1.4); font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption }
+
+                        // Neither GPU attribute applies until the next boot, so a
+                        // queued change says so and offers the reboot rather than
+                        // leaving the row looking like the click was dropped.
+                        Column { visible: root.pendingGpuMode !== ""; width: parent.width; spacing: Style.space(4)
+                            Text {
+                                width: parent.width
+                                text: "Pending reboot — " + Model.gpuModeDef(root.pendingGpuMode).name + " applies on next boot"
+                                wrapMode: Text.WordWrap
+                                color: root.pendingColor
+                                font.family: root.bar.fontFamily
+                                font.pixelSize: Style.font.caption
+                            }
+                            Button {
+                                text: "Reboot now"
+                                iconText: "\u{F0709}"; iconSize: Style.font.body
+                                tooltipText: "Reboot to apply the queued GPU mode.\nClosing your windows first, as Omarchy's own reboot does."
+                                fontSize: Style.font.bodySmall
+                                foreground: root.pendingColor; fontFamily: root.bar.fontFamily
+                                horizontalPadding: Style.spacing.controlPaddingX
+                                verticalPadding: Style.spacing.controlPaddingY
+                                bordered: true
+                                onClicked: if (!rebootProc.running) rebootProc.running = true
+                            }
+                        }
                     }
 
                     // SCREEN — refresh rate comes from Hyprland, overdrive from
@@ -992,7 +1029,9 @@ Panel {
     }
     Process { id: hyprmoncfgSaveProc; onExited: function() { if (!monitorProc.running) monitorProc.running = true } }
     Process { id: sensorProc; command: Model.sensorCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.sensors = Model.parseSensors(text) } } }
-    Process { id: actionProc; onExited: function() { if (!profileProc.running) profileProc.running = true; if (!batteryProc.running) batteryProc.running = true; if (!ledProc.running) ledProc.running = true; if (!armouryProc.running) armouryProc.running = true; if (!monitorProc.running) monitorProc.running = true; if (!fanDetailProc.running) fanDetailProc.running = true } }
+    Process { id: queuedGpuProc; command: Model.queuedGpuCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.queuedGpu = Model.parseQueuedGpu(text) } } }
+    Process { id: rebootProc; command: ["omarchy-system-reboot"] }
+    Process { id: actionProc; onExited: function() { if (!profileProc.running) profileProc.running = true; if (!batteryProc.running) batteryProc.running = true; if (!ledProc.running) ledProc.running = true; if (!armouryProc.running) armouryProc.running = true; if (!queuedGpuProc.running) queuedGpuProc.running = true; if (!monitorProc.running) monitorProc.running = true; if (!fanDetailProc.running) fanDetailProc.running = true } }
     Timer { interval: root.refreshInterval; running: root.opened && root.asusctlAvailable; repeat: true; onTriggered: root.refresh() }
 
     // Sensors run on their own, faster tick — the asusctl round-trip is much

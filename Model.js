@@ -496,12 +496,24 @@ function fmtWatts(w) { return w < 0 ? "—" : (Math.round(w * 10) / 10) + " W" }
 //   Eco      dGPU powered down, iGPU drives the panel
 //   Standard hybrid / Optimus, dGPU available on demand
 //   Ultimate MUX hands the panel straight to the dGPU (reboot required)
+//
+// gpu_mux_mode is NOT "1 means the MUX is engaged". Per the kernel ABI
+// (Documentation/ABI/testing/sysfs-platform-asus-wmi) the value is:
+//
+//   0 - Discrete GPU     (the MUX routes the panel to the dGPU -> Ultimate)
+//   1 - Optimus/Hybrid   (the iGPU drives the panel -> Eco / Standard)
+//
+// so it reads inverted next to every other toggle here, where 1 is the
+// "more" setting. Taking it for a plain on/off flag put Ultimate and
+// Standard the wrong way round: picking Standard rebooted the laptop into
+// discrete mode, which also drops the iGPU's backlight device and leaves
+// the brightness keys writing to a panel nothing is driving.
 var gpuModes = [
-    { id: "eco",      name: "Eco",      icon: "\u{F06C0}", desc: "iGPU only, dGPU off",  mux: 0, dgpuDisable: 1, reboot: false,
+    { id: "eco",      name: "Eco",      icon: "\u{F06C0}", desc: "iGPU only, dGPU off",  mux: 1, dgpuDisable: 1, reboot: false,
       tip: "Powers the discrete GPU down completely.\nBest battery life; games and CUDA will not see a dGPU." },
-    { id: "standard", name: "Standard", icon: "\u{F035B}", desc: "Hybrid (Optimus)",     mux: 0, dgpuDisable: 0, reboot: false,
+    { id: "standard", name: "Standard", icon: "\u{F035B}", desc: "Hybrid (Optimus)",     mux: 1, dgpuDisable: 0, reboot: false,
       tip: "Hybrid graphics. The iGPU drives the screen and the\ndiscrete GPU wakes on demand. The normal setting." },
-    { id: "ultimate", name: "Ultimate", icon: "\u{F04C5}", desc: "dGPU direct — needs reboot", mux: 1, dgpuDisable: 0, reboot: true,
+    { id: "ultimate", name: "Ultimate", icon: "\u{F04C5}", desc: "dGPU direct — needs reboot", mux: 0, dgpuDisable: 0, reboot: true,
       tip: "MUX switch: the discrete GPU drives the internal panel\ndirectly. Fastest for games, costs battery life.\nTakes effect after a reboot." }
 ]
 
@@ -515,8 +527,13 @@ var armouryTips = {
     panel_overdrive: "Speeds up pixel transitions to cut ghosting at high refresh rates.\nCan cause slight overshoot artefacts on some panels."
 }
 
-function gpuModeId(mux, dgpuDisabled) {
-    if (mux) return "ultimate"
+// `hasMux` separates "this laptop reports gpu_mux_mode = 0", which means
+// discrete, from "this laptop has no MUX", where the attribute never appears
+// and the mux argument is only the caller's default. They are the same 0
+// once the polarity is read correctly, so without the flag every mux-less
+// laptop would report itself permanently in Ultimate.
+function gpuModeId(mux, dgpuDisabled, hasMux) {
+    if (hasMux && !mux) return "ultimate"
     return dgpuDisabled ? "eco" : "standard"
 }
 

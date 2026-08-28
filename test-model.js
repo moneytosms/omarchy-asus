@@ -129,9 +129,24 @@ assert.deepEqual(M.parseHyprmoncfgStatus(""), { managed: false, profile: "" })
 assert.deepEqual(M.parseHyprmoncfgStatus("command not found"), { managed: false, profile: "" })
 
 // ---------------------------------------------------------------- gpu mode
-assert.equal(M.gpuModeId(0, 0), "standard")
-assert.equal(M.gpuModeId(0, 1), "eco")
-assert.equal(M.gpuModeId(1, 0), "ultimate")
+// Polarity per the kernel ABI (sysfs-platform-asus-wmi): gpu_mux_mode is
+// 0 = Discrete, 1 = Optimus/Hybrid — the opposite way round to every other
+// toggle, so it gets asserted in both directions.
+assert.equal(M.gpuModeId(1, 0, true), "standard")   // hybrid, dGPU on demand
+assert.equal(M.gpuModeId(1, 1, true), "eco")        // hybrid, dGPU disabled
+assert.equal(M.gpuModeId(0, 0, true), "ultimate")   // MUX routed to the dGPU
+
+// A laptop with no MUX never reports the attribute, so mux is only the
+// caller's default 0 — which must not be mistaken for discrete mode.
+assert.equal(M.gpuModeId(0, 0, false), "standard")
+assert.equal(M.gpuModeId(0, 1, false), "eco")
+
+// The mode table has to agree with the reader, or the button that writes a
+// mode and the highlight that reads it back disagree after a reboot.
+;["eco", "standard", "ultimate"].forEach(function (id) {
+    const def = M.gpuModeDef(id)
+    assert.equal(M.gpuModeId(def.mux, def.dgpuDisable, true), id)
+})
 
 // ---------------------------------------------------------------- features
 // asusctl 6.x names the charge limit ChargeControlEndThreshold; matching only

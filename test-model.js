@@ -148,6 +148,69 @@ assert.equal(M.gpuModeId(0, 1, false), "eco")
     assert.equal(M.gpuModeId(def.mux, def.dgpuDisable, true), id)
 })
 
+// ------------------------------------------------------------ pending gpu
+// asusd reports its queue per attribute, -1 meaning nothing queued. Verbatim
+// shape of the busctl round-trip in Model.queuedGpuScript.
+assert.deepEqual(M.parseQueuedGpu("gpu_mux_mode=-1\ndgpu_disable=0\n"),
+    { gpu_mux_mode: -1, dgpu_disable: 0 })
+// A daemon too old to expose the property, or no busctl at all, must read as
+// "nothing queued" rather than as a queued 0.
+assert.deepEqual(M.parseQueuedGpu(""), { gpu_mux_mode: -1, dgpu_disable: -1 })
+assert.deepEqual(M.parseQueuedGpu("gpu_mux_mode=\ndgpu_disable=junk"),
+    { gpu_mux_mode: -1, dgpu_disable: -1 })
+
+// Nothing queued -> no pending mode.
+assert.equal(M.pendingGpuModeId(1, 0, true, { gpu_mux_mode: -1, dgpu_disable: -1 }), "")
+// Queued from Eco back to Standard: dgpu_disable 1 -> 0, mux untouched.
+assert.equal(M.pendingGpuModeId(1, 1, true, { gpu_mux_mode: -1, dgpu_disable: 0 }), "standard")
+// Queued into Eco from Standard.
+assert.equal(M.pendingGpuModeId(1, 0, true, { gpu_mux_mode: -1, dgpu_disable: 1 }), "eco")
+// A queued mux change alone still lands on the current dgpu_disable, so
+// Standard -> mux 0 is Ultimate, and it must not be read against a default 0.
+assert.equal(M.pendingGpuModeId(1, 0, true, { gpu_mux_mode: 0, dgpu_disable: -1 }), "ultimate")
+// Queued value that matches the live state is not a pending change.
+assert.equal(M.pendingGpuModeId(1, 1, true, { gpu_mux_mode: -1, dgpu_disable: 1 }), "")
+// A missing or malformed queue object must not throw.
+assert.equal(M.pendingGpuModeId(1, 0, true, null), "")
+
+// ------------------------------------------------------- queueing a mode
+const BOTH = { gpuMux: true, dgpuDisable: true }
+const NOTHING_QUEUED = { gpu_mux_mode: -1, dgpu_disable: -1 }
+
+// Live Standard. Eco only needs dgpu_disable; Ultimate only needs the mux.
+assert.deepEqual(M.gpuModeCommand(M.gpuModeDef("eco"), NOTHING_QUEUED, 1, 0, BOTH),
+    ["sh", "-c", "asusctl armoury set dgpu_disable 1"])
+assert.deepEqual(M.gpuModeCommand(M.gpuModeDef("ultimate"), NOTHING_QUEUED, 1, 0, BOTH),
+    ["sh", "-c", "asusctl armoury set gpu_mux_mode 0"])
+// Already there, nothing queued: no command at all.
+assert.equal(M.gpuModeCommand(M.gpuModeDef("standard"), NOTHING_QUEUED, 1, 0, BOTH), null)
+
+// The Standard -> Eco -> Ultimate -> Eco walk. After Eco and Ultimate the
+// queue holds dgpu_disable=1 and gpu_mux_mode=0 while the firmware still
+// reads live Standard. Clicking Eco has to re-queue the mux back to Optimus:
+// comparing against the live value would see mux 1 == 1, write nothing, and
+// let the queued Discrete from the Ultimate click boot into Ultimate.
+const AFTER_ULTIMATE = { gpu_mux_mode: 0, dgpu_disable: 1 }
+assert.deepEqual(M.gpuModeCommand(M.gpuModeDef("eco"), AFTER_ULTIMATE, 1, 0, BOTH),
+    ["sh", "-c", "asusctl armoury set gpu_mux_mode 1"])
+assert.equal(M.pendingGpuModeId(1, 0, true, { gpu_mux_mode: 1, dgpu_disable: 1 }), "eco")
+
+// Going back to the live mode with something queued must cancel that queue,
+// not decide there is nothing to do because the firmware already agrees.
+assert.deepEqual(M.gpuModeCommand(M.gpuModeDef("standard"), AFTER_ULTIMATE, 1, 0, BOTH),
+    ["sh", "-c", "asusctl armoury set gpu_mux_mode 1 && asusctl armoury set dgpu_disable 0"])
+
+// A mode needing both attributes is reachable in one press.
+assert.deepEqual(M.gpuModeCommand(M.gpuModeDef("eco"), NOTHING_QUEUED, 0, 0, BOTH),
+    ["sh", "-c", "asusctl armoury set gpu_mux_mode 1 && asusctl armoury set dgpu_disable 1"])
+
+// Unsupported attributes are never written: on a mux-less laptop Eco is just
+// the dgpu_disable half, and Ultimate has nothing it may legally do.
+const NO_MUX = { gpuMux: false, dgpuDisable: true }
+assert.deepEqual(M.gpuModeCommand(M.gpuModeDef("eco"), NOTHING_QUEUED, 0, 0, NO_MUX),
+    ["sh", "-c", "asusctl armoury set dgpu_disable 1"])
+assert.equal(M.gpuModeCommand(M.gpuModeDef("ultimate"), NOTHING_QUEUED, 0, 0, NO_MUX), null)
+
 // ---------------------------------------------------------------- features
 // asusctl 6.x names the charge limit ChargeControlEndThreshold; matching only
 // on the word "battery" hid the limit slider on models that support it.

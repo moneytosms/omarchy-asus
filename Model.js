@@ -542,6 +542,79 @@ function gpuModeDef(id) {
     return gpuModes[1]
 }
 
+// ---------------------------------------------------------------- pending
+// Both GPU attributes are applied at the next boot, not when they are set:
+// asusd holds the new value ("Queueing GPU attribute … for delayed apply")
+// and `asusctl armoury list` keeps reporting the old one until then. Reading
+// back after a write therefore returns the pre-click value, which made the
+// mode row snap straight back to the old mode and read as "the click did
+// nothing".
+//
+// asusd exposes its queue per attribute on D-Bus as QueuedGpuValue, where -1
+// means nothing is queued. That is the only honest source for this: it is the
+// daemon's own state, so it survives a shell restart and also catches a
+// change queued from the command line.
+var queuedGpuScript =
+    'for a in gpu_mux_mode dgpu_disable; do ' +
+    'v=$(busctl --system get-property xyz.ljones.Asusd ' +
+    '/xyz/ljones/asus_armoury/$a xyz.ljones.AsusArmoury QueuedGpuValue 2>/dev/null | cut -d" " -f2); ' +
+    'echo "$a=${v:--1}"; done'
+
+function queuedGpuCommand() { return ["sh", "-c", queuedGpuScript] }
+
+// -1 (or anything unparseable, including asusd being too old to expose the
+// property) means "nothing queued", so an unavailable daemon simply shows no
+// pending state rather than a wrong one.
+function parseQueuedGpu(raw) {
+    var r = { gpu_mux_mode: -1, dgpu_disable: -1 }
+    var lines = String(raw || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+        var eq = lines[i].indexOf("=")
+        if (eq < 0) continue
+        var k = lines[i].substring(0, eq).trim()
+        var n = parseInt(lines[i].substring(eq + 1).trim())
+        if (r[k] === undefined || isNaN(n)) continue
+        r[k] = n
+    }
+    return r
+}
+
+// The mode the laptop will be in after a reboot, or "" when that is just the
+// mode it is in already. Queued values override the live ones; attributes
+// with nothing queued keep their current value, since a queued mux change
+// alone still lands on the current dgpu_disable.
+// Builds the command that queues a mode, or null when the laptop is already
+// headed there. Two things matter here:
+//
+//   * the comparison is against the *effective* state — the queued value
+//     where there is one, the live value otherwise. Comparing against the
+//     live value alone leaves a stale queued attribute in place: going
+//     Standard -> Eco -> Ultimate -> Eco would re-queue nothing for the mux,
+//     because the firmware still reads Optimus, and the queued Discrete from
+//     the Ultimate click would still win at the next boot.
+//   * both attributes go in one call. Writing only the first difference and
+//     leaving the rest for another click meant a mode needing both was never
+//     reachable in one press.
+function gpuModeCommand(def, queued, mux, dgpuDisabled, supported) {
+    var q = queued || {}, s = supported || {}
+    var effMux = q.gpu_mux_mode >= 0 ? q.gpu_mux_mode : (mux ? 1 : 0)
+    var effDgpu = q.dgpu_disable >= 0 ? q.dgpu_disable : (dgpuDisabled ? 1 : 0)
+    var parts = []
+    if (s.gpuMux && def.mux !== effMux) parts.push("asusctl armoury set gpu_mux_mode " + def.mux)
+    if (s.dgpuDisable && def.dgpuDisable !== effDgpu) parts.push("asusctl armoury set dgpu_disable " + def.dgpuDisable)
+    if (parts.length === 0) return null
+    return ["sh", "-c", parts.join(" && ")]
+}
+
+function pendingGpuModeId(mux, dgpuDisabled, hasMux, queued) {
+    var q = queued || {}
+    var qMux = q.gpu_mux_mode, qDgpu = q.dgpu_disable
+    var liveMux = mux ? 1 : 0, liveDgpu = dgpuDisabled ? 1 : 0
+    if (!(qMux >= 0) && !(qDgpu >= 0)) return ""
+    var next = gpuModeId(qMux >= 0 ? qMux : liveMux, qDgpu >= 0 ? qDgpu : liveDgpu, hasMux)
+    return next === gpuModeId(liveMux, liveDgpu, hasMux) ? "" : next
+}
+
 // ============================================================
 // Display (G-Helper's 60Hz / max-Hz screen toggle)
 // ============================================================

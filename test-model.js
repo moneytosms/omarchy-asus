@@ -72,12 +72,14 @@ bat_power=8627000
 gpu_temp=51
 gpu_power=6.66
 gpu_util=15
+gpu_runtime=active
 `
 const s = M.parseSensors(SENSORS)
 assert.equal(s.cpuTemp, 63)      // millidegrees -> C
 assert.equal(s.fanCpu, 3000)
 assert.equal(s.gpuTemp, 51)
 assert.equal(s.gpuPower, 7)
+assert.equal(s.gpuRuntime, "active")
 assert.equal(s.batPct, 99)
 assert.equal(s.batStatus, "Charging")
 assert.ok(Math.abs(s.batPower - 8.627) < 0.001)  // microwatts -> W
@@ -86,8 +88,15 @@ assert.ok(Math.abs(s.batPower - 8.627) < 0.001)  // microwatts -> W
 const empty = M.parseSensors("")
 assert.equal(empty.cpuTemp, -1)
 assert.equal(empty.gpuTemp, -1)
+assert.equal(empty.gpuRuntime, "")
 assert.equal(M.fmtTemp(-1), "—")
 assert.equal(M.fmtRpm(0), "off")
+
+// A suspended dGPU reports its runtime state without nvidia-smi telemetry.
+const sleeping = M.parseSensors("gpu_runtime=suspended\n")
+assert.equal(sleeping.gpuRuntime, "suspended")
+assert.equal(sleeping.gpuTemp, -1)
+assert.equal(sleeping.gpuPower, -1)
 
 // ---------------------------------------------------------------- display
 const MONITORS = JSON.stringify([

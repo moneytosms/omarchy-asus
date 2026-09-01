@@ -279,6 +279,9 @@ Panel {
     property bool panelOverdrive: false
     property bool gpuMux: false
     property bool dgpuDisable: false
+    property bool bootGpuStateLoaded: false
+    property bool bootGpuMux: false
+    property bool bootDgpuDisable: false
     property var gpuCommandQueue: []
     property int pptPl1: 115
     property int pptPl1Min: 25
@@ -296,6 +299,8 @@ Panel {
     // GPU mode is derived from the mux/dgpu pair rather than stored, so it
     // can never drift out of sync with what the firmware actually reports.
     readonly property string gpuMode: Model.gpuModeId(gpuMux, dgpuDisable, armourySupported.gpuMux)
+    readonly property string bootGpuMode: Model.gpuModeId(bootGpuMux, bootDgpuDisable, armourySupported.gpuMux)
+    readonly property bool gpuModeNeedsReboot: bootGpuStateLoaded && gpuMode !== bootGpuMode
     readonly property bool hasGpuMode: armourySupported.gpuMux || armourySupported.dgpuDisable
     readonly property bool gpuModeBusy: gpuActionProc.running || gpuCommandQueue.length > 0
 
@@ -584,7 +589,7 @@ Panel {
                                 }
                             }
                         }
-                        Text { width: parent.width; text: Model.gpuModeDef(root.gpuMode).desc; wrapMode: Text.WordWrap; color: Qt.darker(root.bar.foreground, 1.4); font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption }
+                        Text { width: parent.width; text: Model.gpuModeDef(root.gpuMode).desc + (root.gpuModeNeedsReboot ? " — needs reboot" : ""); wrapMode: Text.WordWrap; color: Qt.darker(root.bar.foreground, 1.4); font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption }
                     }
 
                     // SCREEN — refresh rate comes from Hyprland, overdrive from
@@ -920,9 +925,19 @@ Panel {
 
     IpcHandler { target: "io.github.moneytosms.asus"; function open() { root.open() } function close() { root.close() } function show() { root.open() } function hide() { root.close() } function toggle() { root.toggle() } function refresh() { root.refresh() } }
     onOpenedChanged: { if (opened) { Qt.callLater(refresh); cursorActive = false } }
-    Component.onCompleted: { checkAsusctl.running = true; checkHyprmoncfg.running = true }
+    Component.onCompleted: { checkAsusctl.running = true; checkHyprmoncfg.running = true; bootGpuProc.running = true }
 
     Process { id: checkAsusctl; command: ["which", "asusctl"]; onExited: function(ec) { root.asusctlAvailable = ec === 0; if (root.asusctlAvailable) refresh() } }
+    Process {
+        id: bootGpuProc
+        command: ["sh", "-c", "printf '%s %s\\n' \"$(cat /sys/devices/platform/asus-nb-wmi/gpu_mux_mode 2>/dev/null)\" \"$(cat /sys/devices/platform/asus-nb-wmi/dgpu_disable 2>/dev/null)\""]
+        stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
+            var state = Model.parseGpuBootState(text)
+            root.bootGpuStateLoaded = state.loaded
+            root.bootGpuMux = state.mux
+            root.bootDgpuDisable = state.dgpuDisabled
+        } }
+    }
     Process { id: profileProc; command: ["asusctl", "profile", "get"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { var p = Model.parseCurrentProfile(text); if (p) { root.currentProfile = p; var i = root.profiles.indexOf(p); if (i >= 0) root.profileIndex = i }; root.acProfile = Model.parseProfiles(text); root.profileLoaded = true } } }
     Process { id: infoProc; command: ["asusctl", "info", "--show-supported"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.supported = Model.parseSupportedFeatures(text); root.infoLoaded = true } } }
     Process { id: batteryProc; command: ["asusctl", "battery", "info"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.batteryLimit = Model.parseBatteryInfo(text).limit } } }

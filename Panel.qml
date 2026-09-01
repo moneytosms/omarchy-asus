@@ -279,6 +279,10 @@ Panel {
     property bool panelOverdrive: false
     property bool gpuMux: false
     property bool dgpuDisable: false
+    property bool bootGpuStateLoaded: false
+    property bool bootGpuMux: false
+    property bool bootDgpuDisable: false
+    property var gpuCommandQueue: []
     property int pptPl1: 115
     property int pptPl1Min: 25
     property int pptPl1Max: 45
@@ -294,8 +298,11 @@ Panel {
 
     // GPU mode is derived from the mux/dgpu pair rather than stored, so it
     // can never drift out of sync with what the firmware actually reports.
-    readonly property string gpuMode: Model.gpuModeId(gpuMux, dgpuDisable)
+    readonly property string gpuMode: Model.gpuModeId(gpuMux, dgpuDisable, armourySupported.gpuMux)
+    readonly property string bootGpuMode: Model.gpuModeId(bootGpuMux, bootDgpuDisable, armourySupported.gpuMux)
+    readonly property bool gpuModeNeedsReboot: bootGpuStateLoaded && gpuMode !== bootGpuMode
     readonly property bool hasGpuMode: armourySupported.gpuMux || armourySupported.dgpuDisable
+    readonly property bool gpuModeBusy: gpuActionProc.running || gpuCommandQueue.length > 0
 
     readonly property bool showBatteryLimit: setting("showBatteryLimit", true) === true
     readonly property int refreshInterval: Math.max(5, Math.min(60, Number(setting("refreshIntervalSec", 10)) || 10)) * 1000
@@ -376,20 +383,25 @@ Panel {
         if (d.nv_temp_target !== undefined) setNvTempTarget(d.nv_temp_target)
     }
 
-    // GPU mode — Eco/Standard/Ultimate collapse to the mux + dgpu_disable
-    // pair. Only the attribute that actually changes is written, so an Eco
-    // switch on a mux-less laptop is still a single valid call.
+    // GPU mode — asusd queues both GPU attributes for safe application during
+    // shutdown. Queue every supported half of the pair in the same order as
+    // rog-control-center so a later selection fully replaces an earlier one.
     function setGpuMode(id) {
+        if (gpuModeBusy) return
         var def = Model.gpuModeDef(id)
-        if (armourySupported.gpuMux && (def.mux === 1) !== gpuMux) {
-            gpuMux = def.mux === 1
-            setArmouryAttr("gpu_mux_mode", def.mux)
-            return
-        }
-        if (armourySupported.dgpuDisable && (def.dgpuDisable === 1) !== dgpuDisable) {
-            dgpuDisable = def.dgpuDisable === 1
-            setArmouryAttr("dgpu_disable", def.dgpuDisable)
-        }
+        gpuCommandQueue = Model.gpuModeCommands(id, armourySupported.gpuMux, armourySupported.dgpuDisable)
+        if (gpuCommandQueue.length === 0) return
+        gpuMux = def.mux === 1
+        dgpuDisable = def.dgpuDisable === 1
+        runNextGpuCommand()
+    }
+
+    function runNextGpuCommand() {
+        if (gpuActionProc.running || gpuCommandQueue.length === 0) return
+        var remaining = gpuCommandQueue.slice()
+        gpuActionProc.command = remaining.shift()
+        gpuCommandQueue = remaining
+        gpuActionProc.running = true
     }
 
     // Applying a refresh rate is two steps where hyprmoncfg is managing
@@ -558,14 +570,15 @@ Panel {
                             Repeater { model: Model.gpuModes
                                 Button {
                                     required property var modelData
+                                    readonly property bool modeAvailable: Model.gpuModeAvailable(modelData.id, root.armourySupported.gpuMux, root.armourySupported.dgpuDisable)
                                     width: gRow.cw
                                     // Ultimate needs the mux; hiding it outright would
                                     // shuffle the row, so it is disabled instead.
-                                    enabled: modelData.id !== "ultimate" ? root.armourySupported.dgpuDisable || root.armourySupported.gpuMux : root.armourySupported.gpuMux
+                                    enabled: modeAvailable && !root.gpuModeBusy
                                     opacity: enabled ? 1 : 0.4
                                     iconText: modelData.icon; iconSize: Style.font.title
                                     text: modelData.name
-                                    tooltipText: enabled ? modelData.tip : modelData.tip + "\n\nNot available: this laptop has no MUX switch."
+                                    tooltipText: modeAvailable ? modelData.tip : modelData.tip + "\n\nNot available: " + (modelData.id === "eco" ? "this laptop cannot disable the dGPU." : "this laptop has no MUX switch.")
                                     fontSize: Style.font.bodySmall
                                     foreground: root.bar.foreground; fontFamily: root.bar.fontFamily
                                     horizontalPadding: Style.spacing.controlPaddingX
@@ -576,7 +589,7 @@ Panel {
                                 }
                             }
                         }
-                        Text { width: parent.width; text: Model.gpuModeDef(root.gpuMode).desc; wrapMode: Text.WordWrap; color: Qt.darker(root.bar.foreground, 1.4); font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption }
+                        Text { width: parent.width; text: Model.gpuModeDef(root.gpuMode).desc + (root.gpuModeNeedsReboot ? " — needs reboot" : ""); wrapMode: Text.WordWrap; color: Qt.darker(root.bar.foreground, 1.4); font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption }
                     }
 
                     // SCREEN — refresh rate comes from Hyprland, overdrive from
@@ -912,9 +925,19 @@ Panel {
 
     IpcHandler { target: "io.github.moneytosms.asus"; function open() { root.open() } function close() { root.close() } function show() { root.open() } function hide() { root.close() } function toggle() { root.toggle() } function refresh() { root.refresh() } }
     onOpenedChanged: { if (opened) { Qt.callLater(refresh); cursorActive = false } }
-    Component.onCompleted: { checkAsusctl.running = true; checkHyprmoncfg.running = true }
+    Component.onCompleted: { checkAsusctl.running = true; checkHyprmoncfg.running = true; bootGpuProc.running = true }
 
     Process { id: checkAsusctl; command: ["which", "asusctl"]; onExited: function(ec) { root.asusctlAvailable = ec === 0; if (root.asusctlAvailable) refresh() } }
+    Process {
+        id: bootGpuProc
+        command: ["sh", "-c", "printf '%s %s\\n' \"$(cat /sys/devices/platform/asus-nb-wmi/gpu_mux_mode 2>/dev/null)\" \"$(cat /sys/devices/platform/asus-nb-wmi/dgpu_disable 2>/dev/null)\""]
+        stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
+            var state = Model.parseGpuBootState(text)
+            root.bootGpuStateLoaded = state.loaded
+            root.bootGpuMux = state.mux
+            root.bootDgpuDisable = state.dgpuDisabled
+        } }
+    }
     Process { id: profileProc; command: ["asusctl", "profile", "get"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { var p = Model.parseCurrentProfile(text); if (p) { root.currentProfile = p; var i = root.profiles.indexOf(p); if (i >= 0) root.profileIndex = i }; root.acProfile = Model.parseProfiles(text); root.profileLoaded = true } } }
     Process { id: infoProc; command: ["asusctl", "info", "--show-supported"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.supported = Model.parseSupportedFeatures(text); root.infoLoaded = true } } }
     Process { id: batteryProc; command: ["asusctl", "battery", "info"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.batteryLimit = Model.parseBatteryInfo(text).limit } } }
@@ -993,6 +1016,7 @@ Panel {
     Process { id: hyprmoncfgSaveProc; onExited: function() { if (!monitorProc.running) monitorProc.running = true } }
     Process { id: sensorProc; command: Model.sensorCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.sensors = Model.parseSensors(text) } } }
     Process { id: actionProc; onExited: function() { if (!profileProc.running) profileProc.running = true; if (!batteryProc.running) batteryProc.running = true; if (!ledProc.running) ledProc.running = true; if (!armouryProc.running) armouryProc.running = true; if (!monitorProc.running) monitorProc.running = true; if (!fanDetailProc.running) fanDetailProc.running = true } }
+    Process { id: gpuActionProc; onExited: function() { root.runNextGpuCommand() } }
     Timer { interval: root.refreshInterval; running: root.opened && root.asusctlAvailable; repeat: true; onTriggered: root.refresh() }
 
     // Sensors run on their own, faster tick — the asusctl round-trip is much

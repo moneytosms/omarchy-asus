@@ -497,11 +497,11 @@ function fmtWatts(w) { return w < 0 ? "—" : (Math.round(w * 10) / 10) + " W" }
 //   Standard hybrid / Optimus, dGPU available on demand
 //   Ultimate MUX hands the panel straight to the dGPU (reboot required)
 var gpuModes = [
-    { id: "eco",      name: "Eco",      icon: "\u{F06C0}", desc: "iGPU only, dGPU off",  mux: 0, dgpuDisable: 1, reboot: false,
-      tip: "Powers the discrete GPU down completely.\nBest battery life; games and CUDA will not see a dGPU." },
-    { id: "standard", name: "Standard", icon: "\u{F035B}", desc: "Hybrid (Optimus)",     mux: 0, dgpuDisable: 0, reboot: false,
-      tip: "Hybrid graphics. The iGPU drives the screen and the\ndiscrete GPU wakes on demand. The normal setting." },
-    { id: "ultimate", name: "Ultimate", icon: "\u{F04C5}", desc: "dGPU direct — needs reboot", mux: 1, dgpuDisable: 0, reboot: true,
+    { id: "eco",      name: "Eco",      icon: "\u{F06C0}", desc: "iGPU only, dGPU off", mux: 1, dgpuDisable: 1, reboot: true,
+      tip: "Powers the discrete GPU down completely.\nBest battery life; games and CUDA will not see a dGPU.\nTakes effect after a reboot." },
+    { id: "standard", name: "Standard", icon: "\u{F035B}", desc: "Hybrid (Optimus)", mux: 1, dgpuDisable: 0, reboot: true,
+      tip: "Hybrid graphics. The iGPU drives the screen and the\ndiscrete GPU wakes on demand. The normal setting.\nTakes effect after a reboot." },
+    { id: "ultimate", name: "Ultimate", icon: "\u{F04C5}", desc: "dGPU direct", mux: 0, dgpuDisable: 0, reboot: true,
       tip: "MUX switch: the discrete GPU drives the internal panel\ndirectly. Fastest for games, costs battery life.\nTakes effect after a reboot." }
 ]
 
@@ -515,9 +515,36 @@ var armouryTips = {
     panel_overdrive: "Speeds up pixel transitions to cut ghosting at high refresh rates.\nCan cause slight overshoot artefacts on some panels."
 }
 
-function gpuModeId(mux, dgpuDisabled) {
-    if (mux) return "ultimate"
+// ASUS firmware defines gpu_mux_mode 0 as discrete and 1 as Optimus. On
+// mux-less laptops only dgpu_disable participates in the mode selection.
+function gpuModeId(mux, dgpuDisabled, muxAvailable) {
+    if (muxAvailable && !mux) return "ultimate"
     return dgpuDisabled ? "eco" : "standard"
+}
+
+function parseGpuBootState(text) {
+    var values = String(text || "").trim().split(/\s+/)
+    if (values.length < 2 || !/^[01]$/.test(values[0]) || !/^[01]$/.test(values[1]))
+        return { loaded: false, mux: false, dgpuDisabled: false }
+    return { loaded: true, mux: values[0] === "1", dgpuDisabled: values[1] === "1" }
+}
+
+function gpuModeAvailable(id, muxAvailable, dgpuDisableAvailable) {
+    if (id === "ultimate") return muxAvailable
+    if (id === "eco") return dgpuDisableAvailable
+    return muxAvailable || dgpuDisableAvailable
+}
+
+// GPU attributes are queued by asusd and applied safely at shutdown. Always
+// queue every supported half of the pair so a second selection also replaces
+// values left in the queue by an earlier, not-yet-rebooted selection.
+function gpuModeCommands(id, muxAvailable, dgpuDisableAvailable) {
+    var def = gpuModeDef(id), commands = []
+    if (dgpuDisableAvailable)
+        commands.push(["asusctl", "armoury", "set", "dgpu_disable", String(def.dgpuDisable)])
+    if (muxAvailable)
+        commands.push(["asusctl", "armoury", "set", "gpu_mux_mode", String(def.mux)])
+    return commands
 }
 
 function gpuModeDef(id) {

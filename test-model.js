@@ -129,9 +129,30 @@ assert.deepEqual(M.parseHyprmoncfgStatus(""), { managed: false, profile: "" })
 assert.deepEqual(M.parseHyprmoncfgStatus("command not found"), { managed: false, profile: "" })
 
 // ---------------------------------------------------------------- gpu mode
-assert.equal(M.gpuModeId(0, 0), "standard")
-assert.equal(M.gpuModeId(0, 1), "eco")
-assert.equal(M.gpuModeId(1, 0), "ultimate")
+assert.equal(M.gpuModeId(1, 0, true), "standard")
+assert.equal(M.gpuModeId(1, 1, true), "eco")
+assert.equal(M.gpuModeId(0, 0, true), "ultimate")
+assert.equal(M.gpuModeId(0, 1, true), "ultimate")
+assert.equal(M.gpuModeId(0, 0, false), "standard")
+assert.equal(M.gpuModeId(0, 1, false), "eco")
+assert.equal(M.gpuModeAvailable("eco", true, false), false)
+assert.equal(M.gpuModeAvailable("standard", true, false), true)
+assert.equal(M.gpuModeAvailable("ultimate", false, true), false)
+assert.deepEqual(M.gpuModeCommands("eco", true, true), [
+    ["asusctl", "armoury", "set", "dgpu_disable", "1"],
+    ["asusctl", "armoury", "set", "gpu_mux_mode", "1"]
+])
+assert.deepEqual(M.gpuModeCommands("standard", true, true), [
+    ["asusctl", "armoury", "set", "dgpu_disable", "0"],
+    ["asusctl", "armoury", "set", "gpu_mux_mode", "1"]
+])
+assert.deepEqual(M.gpuModeCommands("ultimate", true, true), [
+    ["asusctl", "armoury", "set", "dgpu_disable", "0"],
+    ["asusctl", "armoury", "set", "gpu_mux_mode", "0"]
+])
+assert.deepEqual(M.gpuModeCommands("standard", false, true), [
+    ["asusctl", "armoury", "set", "dgpu_disable", "0"]
+])
 
 // ---------------------------------------------------------------- features
 // asusctl 6.x names the charge limit ChargeControlEndThreshold; matching only

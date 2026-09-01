@@ -279,6 +279,7 @@ Panel {
     property bool panelOverdrive: false
     property bool gpuMux: false
     property bool dgpuDisable: false
+    property var gpuCommandQueue: []
     property int pptPl1: 115
     property int pptPl1Min: 25
     property int pptPl1Max: 45
@@ -294,8 +295,9 @@ Panel {
 
     // GPU mode is derived from the mux/dgpu pair rather than stored, so it
     // can never drift out of sync with what the firmware actually reports.
-    readonly property string gpuMode: Model.gpuModeId(gpuMux, dgpuDisable)
+    readonly property string gpuMode: Model.gpuModeId(gpuMux, dgpuDisable, armourySupported.gpuMux)
     readonly property bool hasGpuMode: armourySupported.gpuMux || armourySupported.dgpuDisable
+    readonly property bool gpuModeBusy: gpuActionProc.running || gpuCommandQueue.length > 0
 
     readonly property bool showBatteryLimit: setting("showBatteryLimit", true) === true
     readonly property int refreshInterval: Math.max(5, Math.min(60, Number(setting("refreshIntervalSec", 10)) || 10)) * 1000
@@ -376,20 +378,25 @@ Panel {
         if (d.nv_temp_target !== undefined) setNvTempTarget(d.nv_temp_target)
     }
 
-    // GPU mode — Eco/Standard/Ultimate collapse to the mux + dgpu_disable
-    // pair. Only the attribute that actually changes is written, so an Eco
-    // switch on a mux-less laptop is still a single valid call.
+    // GPU mode — asusd queues both GPU attributes for safe application during
+    // shutdown. Queue every supported half of the pair in the same order as
+    // rog-control-center so a later selection fully replaces an earlier one.
     function setGpuMode(id) {
+        if (gpuModeBusy) return
         var def = Model.gpuModeDef(id)
-        if (armourySupported.gpuMux && (def.mux === 1) !== gpuMux) {
-            gpuMux = def.mux === 1
-            setArmouryAttr("gpu_mux_mode", def.mux)
-            return
-        }
-        if (armourySupported.dgpuDisable && (def.dgpuDisable === 1) !== dgpuDisable) {
-            dgpuDisable = def.dgpuDisable === 1
-            setArmouryAttr("dgpu_disable", def.dgpuDisable)
-        }
+        gpuCommandQueue = Model.gpuModeCommands(id, armourySupported.gpuMux, armourySupported.dgpuDisable)
+        if (gpuCommandQueue.length === 0) return
+        gpuMux = def.mux === 1
+        dgpuDisable = def.dgpuDisable === 1
+        runNextGpuCommand()
+    }
+
+    function runNextGpuCommand() {
+        if (gpuActionProc.running || gpuCommandQueue.length === 0) return
+        var remaining = gpuCommandQueue.slice()
+        gpuActionProc.command = remaining.shift()
+        gpuCommandQueue = remaining
+        gpuActionProc.running = true
     }
 
     // Applying a refresh rate is two steps where hyprmoncfg is managing
@@ -558,14 +565,15 @@ Panel {
                             Repeater { model: Model.gpuModes
                                 Button {
                                     required property var modelData
+                                    readonly property bool modeAvailable: Model.gpuModeAvailable(modelData.id, root.armourySupported.gpuMux, root.armourySupported.dgpuDisable)
                                     width: gRow.cw
                                     // Ultimate needs the mux; hiding it outright would
                                     // shuffle the row, so it is disabled instead.
-                                    enabled: modelData.id !== "ultimate" ? root.armourySupported.dgpuDisable || root.armourySupported.gpuMux : root.armourySupported.gpuMux
+                                    enabled: modeAvailable && !root.gpuModeBusy
                                     opacity: enabled ? 1 : 0.4
                                     iconText: modelData.icon; iconSize: Style.font.title
                                     text: modelData.name
-                                    tooltipText: enabled ? modelData.tip : modelData.tip + "\n\nNot available: this laptop has no MUX switch."
+                                    tooltipText: modeAvailable ? modelData.tip : modelData.tip + "\n\nNot available: " + (modelData.id === "eco" ? "this laptop cannot disable the dGPU." : "this laptop has no MUX switch.")
                                     fontSize: Style.font.bodySmall
                                     foreground: root.bar.foreground; fontFamily: root.bar.fontFamily
                                     horizontalPadding: Style.spacing.controlPaddingX
@@ -993,6 +1001,7 @@ Panel {
     Process { id: hyprmoncfgSaveProc; onExited: function() { if (!monitorProc.running) monitorProc.running = true } }
     Process { id: sensorProc; command: Model.sensorCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.sensors = Model.parseSensors(text) } } }
     Process { id: actionProc; onExited: function() { if (!profileProc.running) profileProc.running = true; if (!batteryProc.running) batteryProc.running = true; if (!ledProc.running) ledProc.running = true; if (!armouryProc.running) armouryProc.running = true; if (!monitorProc.running) monitorProc.running = true; if (!fanDetailProc.running) fanDetailProc.running = true } }
+    Process { id: gpuActionProc; onExited: function() { root.runNextGpuCommand() } }
     Timer { interval: root.refreshInterval; running: root.opened && root.asusctlAvailable; repeat: true; onTriggered: root.refresh() }
 
     // Sensors run on their own, faster tick — the asusctl round-trip is much

@@ -433,9 +433,9 @@ var presetColors = [
 // ============================================================
 // One shell round-trip per tick instead of a Process per reading. hwmon
 // indices are not stable across boots, so chips are matched by their `name`
-// file rather than a hardcoded hwmonN path. nvidia-smi is optional — the
-// block is skipped entirely on machines without it, and the GPU tiles hide
-// themselves when the keys never arrive.
+// file rather than a hardcoded hwmonN path. Reading PCI runtime_status does
+// not wake a suspended dGPU; nvidia-smi is only queried when the card is
+// already active, since querying it unconditionally can wake the card.
 var sensorScript =
     'for h in /sys/class/hwmon/*; do n=$(cat "$h/name" 2>/dev/null); case "$n" in ' +
     'coretemp|k10temp|zenpower) echo "cpu_temp=$(cat "$h/temp1_input" 2>/dev/null)";; ' +
@@ -445,16 +445,20 @@ var sensorScript =
     'echo "bat_pct=$(cat $b/capacity 2>/dev/null)"; ' +
     'echo "bat_status=$(cat $b/status 2>/dev/null)"; ' +
     'echo "bat_power=$(cat $b/power_now 2>/dev/null)"; fi; ' +
-    'if command -v nvidia-smi >/dev/null 2>&1; then ' +
+    'g=""; for d in /sys/bus/pci/devices/*; do ' +
+    '[ "$(cat "$d/vendor" 2>/dev/null)" = "0x10de" ] || continue; ' +
+    'case "$(cat "$d/class" 2>/dev/null)" in 0x03*) g="$d"; break;; esac; done; ' +
+    'if [ -n "$g" ]; then s=$(cat "$g/power/runtime_status" 2>/dev/null); echo "gpu_runtime=$s"; ' +
+    'if [ "$s" = "active" ] && command -v nvidia-smi >/dev/null 2>&1; then ' +
     'nvidia-smi --query-gpu=temperature.gpu,power.draw,utilization.gpu --format=csv,noheader,nounits 2>/dev/null ' +
-    '| head -1 | tr -d " " | { IFS=, read t p u; echo "gpu_temp=$t"; echo "gpu_power=$p"; echo "gpu_util=$u"; }; fi'
+    '| head -1 | tr -d " " | { IFS=, read t p u; echo "gpu_temp=$t"; echo "gpu_power=$p"; echo "gpu_util=$u"; }; fi; fi'
 
 function sensorCommand() { return ["sh", "-c", sensorScript] }
 
 // -1 means "not reported" throughout; callers hide the tile rather than
 // printing a bogus zero.
 function parseSensors(raw) {
-    var r = { cpuTemp: -1, gpuTemp: -1, gpuPower: -1, gpuUtil: -1, fanCpu: -1, fanGpu: -1, batPct: -1, batStatus: "", batPower: -1 }
+    var r = { cpuTemp: -1, gpuTemp: -1, gpuPower: -1, gpuUtil: -1, gpuRuntime: "", fanCpu: -1, fanGpu: -1, batPct: -1, batStatus: "", batPower: -1 }
     var lines = String(raw || "").split("\n")
     for (var i = 0; i < lines.length; i++) {
         var eq = lines[i].indexOf("=")
@@ -466,6 +470,7 @@ function parseSensors(raw) {
         else if (k === "gpu_temp" && !isNaN(n)) r.gpuTemp = Math.round(n)
         else if (k === "gpu_power" && !isNaN(n)) r.gpuPower = Math.round(n)
         else if (k === "gpu_util" && !isNaN(n)) r.gpuUtil = Math.round(n)
+        else if (k === "gpu_runtime") r.gpuRuntime = v
         else if (k === "fan_cpu" && !isNaN(n)) r.fanCpu = Math.round(n)
         else if (k === "fan_gpu" && !isNaN(n)) r.fanGpu = Math.round(n)
         else if (k === "bat_pct" && !isNaN(n)) r.batPct = Math.round(n)

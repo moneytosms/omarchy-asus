@@ -201,8 +201,9 @@ Panel {
 
     // Live sensors — refreshed on a faster tick than the asusctl state, since
     // temps and fan speeds are the numbers you actually watch move.
-    property var sensors: ({ cpuTemp: -1, gpuTemp: -1, gpuPower: -1, gpuUtil: -1, fanCpu: -1, fanGpu: -1, batPct: -1, batStatus: "", batPower: -1 })
-    readonly property bool hasNvidia: sensors.gpuTemp >= 0
+    property var sensors: ({ cpuTemp: -1, gpuTemp: -1, gpuPower: -1, gpuUtil: -1, gpuRuntime: "", fanCpu: -1, fanGpu: -1, batPct: -1, batStatus: "", batPower: -1 })
+    readonly property bool hasNvidia: sensors.gpuRuntime !== ""
+    readonly property bool nvidiaSleeping: sensors.gpuRuntime === "suspended"
 
     // Display — the built-in panel's current/available refresh rates, read
     // from Hyprland rather than asusctl (which has no display controls).
@@ -415,7 +416,8 @@ Panel {
         tooltipText: {
             var t = "ASUS — " + Model.profileLabel(root.currentProfile)
             if (root.sensors.cpuTemp >= 0) t += "\nCPU  " + Model.fmtTemp(root.sensors.cpuTemp) + "   " + Model.fmtRpm(root.sensors.fanCpu)
-            if (root.sensors.gpuTemp >= 0) t += "\nGPU  " + Model.fmtTemp(root.sensors.gpuTemp) + "   " + Model.fmtRpm(root.sensors.fanGpu)
+            if (root.nvidiaSleeping) t += "\nGPU  Sleeping"
+            else if (root.sensors.gpuTemp >= 0) t += "\nGPU  " + Model.fmtTemp(root.sensors.gpuTemp) + "   " + Model.fmtRpm(root.sensors.fanGpu)
             return t
         }
         onPressed: function(b) { root.toggle() }
@@ -512,9 +514,9 @@ Panel {
                             visible: root.hasNvidia
                             width: sensorGrid.cw
                             caption: "GPU"
-                            tip: "Discrete GPU temperature, its fan speed, and how busy it is.\nIdles near 0% when nothing is using the dGPU."
-                            value: Model.fmtTemp(root.sensors.gpuTemp)
-                            sub: Model.fmtRpm(root.sensors.fanGpu) + (root.sensors.gpuUtil >= 0 ? "   " + root.sensors.gpuUtil + "%" : "")
+                            tip: "Discrete GPU runtime state, temperature, fan speed, and utilisation.\nSleeping is detected through PCI sysfs without waking the dGPU."
+                            value: root.nvidiaSleeping ? "Sleeping" : Model.fmtTemp(root.sensors.gpuTemp)
+                            sub: root.nvidiaSleeping ? "dGPU runtime suspended" : Model.fmtRpm(root.sensors.fanGpu) + (root.sensors.gpuUtil >= 0 ? "   " + root.sensors.gpuUtil + "%" : "")
                             valueColor: Model.tempColor(root.sensors.gpuTemp)
                             foreground: root.bar.foreground; fontFamily: root.bar.fontFamily
                         }

@@ -238,4 +238,170 @@ assert.equal(M.serializeFanPoints(pts), "30c:1%,49c:2%,60c:40%")
 const moved = M.moveFanPoint(pts, 0, 200, -5)
 assert.deepEqual(moved[moved.length - 1], { temp: 100, speed: 0 })
 
+// ---------------------------------------------------------------- slash
+// Verbatim `asusctl slash --list` output (asusctl 6.3.8, ROG Zephyrus G14
+// GA403WM). The order matters as much as the names: it is the index space
+// asusd reports the active mode in.
+const SLASH_LIST = `"Static"
+"Bounce"
+"Slash"
+"Loading"
+"BitStream"
+"Transmission"
+"Flow"
+"Flux"
+"Phantom"
+"Spectrum"
+"Hazard"
+"Interfacing"
+"Ramp"
+"GameOver"
+"Start"
+"Buzzer"
+`
+const sm = M.parseSlashModes(SLASH_LIST)
+assert.equal(sm.length, 16)
+assert.equal(sm[0], "Static")
+assert.equal(sm[15], "Buzzer")
+// The index of a name here is what asusd's mode field carries.
+assert.equal(sm.indexOf("Spectrum"), 9)
+// Noise (a header line, an error, a blank) never becomes a mode tile.
+assert.deepEqual(M.parseSlashModes("Error: no such device\n\n"), [])
+assert.deepEqual(M.parseSlashModes(""), [])
+
+// `busctl call ... xyz.ljones.Slash DeviceState`, verbatim.
+const st = M.parseSlashState("byyu true 255 0 15\n")
+assert.equal(st.available, true)
+assert.equal(st.enabled, true)
+assert.equal(st.brightness, 255)
+assert.equal(st.interval, 0)
+assert.equal(st.mode, 15)
+assert.equal(sm[st.mode], "Buzzer")
+assert.deepEqual(M.parseSlashState("byyu false 100 3 9"),
+    { available: true, enabled: false, brightness: 100, interval: 3, mode: 9 })
+// No ledbar, or an asusd too old to expose one, must read as unavailable
+// rather than as a switched-off ledbar — the panel keeps its last known state
+// on `available: false` instead of snapping to a fabricated one.
+assert.equal(M.parseSlashState("").available, false)
+assert.equal(M.parseSlashState("Unknown object '/xyz/ljones/Slash'").available, false)
+
+// hasSlash matches the full interface name: "Slash" alone is also the name of
+// one of the ledbar's own animations.
+const SLASH_INFO = `Supported Core Functions:
+[
+    "xyz.ljones.Platform",
+    "xyz.ljones.Aura",
+    "xyz.ljones.Slash",
+]
+`
+assert.equal(M.parseSupportedFeatures(SLASH_INFO).hasSlash, true)
+assert.equal(M.parseSupportedFeatures(INFO).hasSlash, false)
+// The word on its own (here, an animation name) is not a device.
+assert.equal(M.parseSupportedFeatures("Supported Aura Modes:\n[\n    Slash,\n]").hasSlash, false)
+
+assert.deepEqual(M.slashModeCommand("Ramp"), ["asusctl", "slash", "--mode", "Ramp"])
+assert.deepEqual(M.slashEnableCommand(true), ["asusctl", "slash", "--enable"])
+assert.deepEqual(M.slashEnableCommand(false), ["asusctl", "slash", "--disable"])
+// Out-of-range values are clamped to the firmware's ranges rather than passed
+// through for asusctl to reject.
+assert.deepEqual(M.slashBrightnessCommand(999), ["asusctl", "slash", "--brightness", "255"])
+assert.deepEqual(M.slashBrightnessCommand(-5), ["asusctl", "slash", "--brightness", "0"])
+assert.deepEqual(M.slashIntervalCommand(9), ["asusctl", "slash", "--interval", "5"])
+
+// Every mode asusctl lists has its own description and preview animation, so
+// no tile falls back to the "no description for it yet" placeholder.
+sm.forEach(function(name) {
+    const d = M.slashModeDef(name)
+    assert.equal(d.name, name)
+    assert.ok(d.tip.indexOf("no description") < 0, name + " has no tooltip copy")
+    assert.ok(d.icon.length > 0, name + " has no icon")
+})
+// A mode from a newer asusctl still gets a usable tile.
+const unknown = M.slashModeDef("Wormhole")
+assert.equal(unknown.anim, "static")
+assert.ok(unknown.tip.indexOf("Wormhole") === 0)
+
+// Preview frames stay in range for every animation, at every phase, and are
+// deterministic — the flicker modes must not re-roll between repaints of the
+// same frame or they animate into uniform mush.
+sm.forEach(function(name) {
+    const anim = M.slashModeDef(name).anim
+    for (let ph = 0; ph < 1; ph += 0.05) {
+        const lv = M.slashPreviewLevels(anim, ph, 20)
+        assert.equal(lv.length, 20, name)
+        lv.forEach(function(v) {
+            assert.ok(v >= 0 && v <= 1 && !isNaN(v), name + " @" + ph + " -> " + v)
+        })
+        assert.deepEqual(M.slashPreviewLevels(anim, ph, 20), lv, name + " is not deterministic")
+    }
+})
+// Provenance. The firmware animates the bar itself, so the real frames cannot
+// be read back and each shape is either watched or guessed. The split is
+// asserted so it cannot rot silently: a mode gets confirmed by dropping its
+// `guess` flag, and that has to be a deliberate edit, not a drift.
+;(function () {
+    const confirmed = ["Static", "BitStream", "Phantom", "Interfacing", "Flow", "Spectrum", "Ramp", "GameOver", "Hazard"]
+    const guessed = ["Bounce", "Slash", "Loading", "Transmission", "Flux", "Start", "Buzzer"]
+    assert.equal(confirmed.length + guessed.length, sm.length, "every listed mode is accounted for")
+    confirmed.forEach(function (n) { assert.equal(M.slashModeDef(n).guess, false, n + " is confirmed") })
+    guessed.forEach(function (n) { assert.equal(M.slashModeDef(n).guess, true, n + " is only a guess") })
+    // A guessed preview says so where the user can see it, not just in a comment.
+    assert.ok(M.slashModeDef("Bounce").tip.indexOf("Preview approximate") > 0)
+    assert.ok(M.slashModeDef("Phantom").tip.indexOf("Preview approximate") < 0)
+})()
+
+// Shapes corrected against the real ledbar (reported from hardware), not
+// guessed. Left of the strip is the BOTTOM of the physical bar, right is the
+// TOP — a travelling animation running left-to-right runs bottom-to-top.
+//
+// Flow is not a travelling wave: two points run in from both ends, meet in the
+// middle, then head back out. So the frame is symmetric at every phase, and
+// the middle is brightest exactly when the ends are dimmest.
+;(function () {
+    const mid = M.slashPreviewLevels("converge", 0.5, 21)
+    // Compared with a tolerance: the two heads are computed from opposite ends
+    // so mirrored pairs land ~1e-16 apart, which deepEqual would fail on.
+    mid.forEach(function (v, i) {
+        assert.ok(Math.abs(v - mid[mid.length - 1 - i]) < 1e-9, "Flow must stay symmetric")
+    })
+    assert.ok(mid[10] > 0.9, "Flow: the two heads must meet in the middle")
+    assert.ok(mid[0] < 0.1 && mid[20] < 0.1, "Flow: ends dark once met")
+    const ends = M.slashPreviewLevels("converge", 0, 21)
+    assert.ok(ends[0] > 0.9 && ends[20] > 0.9, "Flow: heads start at the ends")
+    assert.ok(ends[10] < 0.1, "Flow: middle dark when the heads are apart")
+})()
+
+// Spectrum opens with a wipe DOWN from the top before the cycling band. Only
+// the band half was implemented at first, which read as starting mid-effect.
+;(function () {
+    const early = M.slashPreviewLevels("spectrum", 0.05, 20)
+    assert.ok(early[19] > 0.9, "Spectrum: the wipe starts at the top")
+    assert.ok(early[0] < 0.1, "Spectrum: the bottom is not lit yet")
+    const later = M.slashPreviewLevels("spectrum", 0.3, 20)
+    const litEarly = early.filter(function (v) { return v > 0.5 }).length
+    const litLater = later.filter(function (v) { return v > 0.5 }).length
+    assert.ok(litLater > litEarly, "Spectrum: the wipe must travel downwards")
+})()
+
+// Ramp climbs towards the top. A bare sawtooth put a hard reset edge mid-bar
+// that read as a glitch, so the wrap falls off over a short run instead.
+;(function () {
+    const f = M.slashPreviewLevels("ramp", 0, 20)
+    let maxJump = 0
+    for (let i = 1; i < f.length; i++) maxJump = Math.max(maxJump, Math.abs(f[i] - f[i - 1]))
+    assert.ok(maxJump < 0.7, "Ramp: no hard sawtooth edge (jump " + maxJump.toFixed(2) + ")")
+})()
+
+// Static is the only one fully lit at every phase; the rest actually move,
+// which is the whole point of the preview. Checked across the whole loop
+// rather than at two arbitrary phases — the slower blinks (Hazard, GameOver)
+// hold a frame long enough for any two given samples to land on the same one.
+assert.deepEqual(M.slashPreviewLevels("static", 0.4, 3), [1, 1, 1])
+sm.filter(function(n) { return M.slashModeDef(n).anim !== "static" }).forEach(function(name) {
+    const anim = M.slashModeDef(name).anim
+    const frames = new Set()
+    for (let ph = 0; ph < 1; ph += 0.02) frames.add(M.slashPreviewLevels(anim, ph, 20).join())
+    assert.ok(frames.size > 1, anim + " does not animate")
+})
+
 console.log("ok - all Model.js checks passed")

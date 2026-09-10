@@ -138,6 +138,10 @@ function parseSupportedFeatures(raw) {
         hasBattery: text.indexOf("ChargeControlEndThreshold") >= 0 || text.indexOf("battery") >= 0 || text.indexOf("Battery") >= 0,
         hasProfile: text.indexOf("Platform") >= 0,
         hasAniMe: text.indexOf("anime") >= 0,
+        // Matched on the full interface name: "Slash" on its own also names
+        // one of the ledbar's own animations, so the bare word would report a
+        // ledbar on any machine whose output happens to mention it.
+        hasSlash: text.indexOf("xyz.ljones.Slash") >= 0,
         auraModes: parseListSection(text, "Supported Aura Modes:")
     }
 }
@@ -397,6 +401,233 @@ function parseLedBrightness(raw) {
     if (text.indexOf("med") >= 0) return "med"
     if (text.indexOf("low") >= 0) return "low"
     return "off"
+}
+
+// ============================================================
+// Slash ledbar (the lid LED strip on Zephyrus and some Strix models)
+// ============================================================
+// The animation list is read from asusctl itself (`asusctl slash --list`)
+// rather than hardcoded, because a name's *position* in that list is the value
+// asusd reports for the active mode. Reading both from the same source keeps
+// the name -> index mapping correct on an asusctl that adds an animation.
+//
+// slashModeInfo is presentation only: an icon, a sentence of tooltip copy, and
+// which preview animation to draw. A mode asusctl reports that is missing here
+// still appears in the grid, with a neutral icon and a steady preview.
+//
+// PROVENANCE. The firmware animates the bar entirely on its own — after a mode
+// is set, asusd sends nothing further (measured: zero CPU while an animation
+// runs), no LED device appears in sysfs, and the Slash D-Bus interface carries
+// only mode/brightness/interval/enabled. So the real frames cannot be read
+// back from anywhere, and every shape below is either confirmed by watching
+// the hardware or inferred from the mode's name.
+//
+//   confirmed — watched on the bar, or read frame by frame off an ASUS
+//   animation capture:
+//     Static, BitStream, Phantom, Interfacing, Flow, Spectrum, Ramp,
+//     GameOver, Hazard
+//   inferred from the name only, NOT yet checked (marked `guess: true`):
+//     Bounce, Slash, Loading, Transmission, Flux, Start, Buzzer
+//
+// Guessing badly is not hypothetical, and it has been wrong every single time
+// it was checked: Flow was written as a travelling wave when the bar actually
+// runs two points in from the ends; Spectrum was missing the wipe it opens
+// with; GameOver was three full-bar flashes when the real thing is a symmetric
+// ends-then-middle sequence; Hazard was alternating blocks when bands actually
+// spread outwards from the centre. Keep the flag honest — drop `guess` from an
+// entry when, and only when, someone has watched that mode run.
+var slashModeInfo = {
+    Static:       { icon: "\u{F05A8}", anim: "static",   tip: "The bar sits lit at a steady level." },
+    Bounce:       { icon: "\u{F0361}", anim: "bounce", guess: true,   tip: "A lit block runs to one end of the bar and back." },
+    Slash:        { icon: "\u{F0330}", anim: "sweep", guess: true,    tip: "A bright slash sweeps across the bar and repeats." },
+    Loading:      { icon: "\u{F0764}", anim: "fill", guess: true,     tip: "The bar fills from one end, then starts over." },
+    BitStream:    { icon: "\u{F0244}", anim: "bits",     tip: "Scattered segments flicker like scrolling data." },
+    Transmission: { icon: "\u{F035B}", anim: "burst", guess: true,    tip: "Blocks of segments pulse in bursts." },
+    Flow:         { icon: "\u{F0276}", anim: "converge", tip: "Two points run in from the ends, meet in the middle,\nthen head back out." },
+    Flux:         { icon: "\u{F01C8}", anim: "breathe", guess: true,  tip: "The whole bar breathes up and down." },
+    Phantom:      { icon: "\u{F032A}", anim: "phantom",  tip: "A soft, wide glow drifts back and forth." },
+    Spectrum:     { icon: "\u{F053E}", anim: "spectrum", tip: "Wipes down from the top, then a bright band cycles\nalong the whole bar." },
+    Hazard:       { icon: "\u{F0192}", anim: "hazard",   tip: "Bands spread outwards from the middle to both ends,\nwith a flash partway through." },
+    Interfacing:  { icon: "\u{F029A}", anim: "flicker",  tip: "Rapid, restless flicker across the segments." },
+    Ramp:         { icon: "\u{F04C5}", anim: "ramp",     tip: "A brightness ramp slides up the bar and restarts." },
+    GameOver:     { icon: "\u{F030D}", anim: "gameover", tip: "Ends light up and hold, the middle takes over, then the\nwhole bar flashes and settles." },
+    Start:        { icon: "\u{F0709}", anim: "sweep", guess: true,    tip: "A single sweep, then the bar settles." },
+    Buzzer:       { icon: "\u{F04DA}", anim: "strobe", guess: true,   tip: "Fast full-bar strobe." }
+}
+
+function slashModeDef(name) {
+    var n = String(name || "")
+    var i = slashModeInfo[n]
+    if (i) return { name: n, icon: i.icon, anim: i.anim, guess: !!i.guess,
+                    // Said out loud in the tooltip rather than kept as a code
+                    // comment: an unchecked preview that presents itself as
+                    // fact is worse than no preview at all.
+                    tip: i.tip + (i.guess ? "\n\n(Preview approximate — not yet checked against the bar.)" : "") }
+    return { name: n, icon: "\u{F0244}", anim: "static", guess: true,
+             tip: n + "\nReported by asusctl; this panel has no description for it yet." }
+}
+
+function slashListCommand() { return ["asusctl", "slash", "--list"] }
+
+// `asusctl slash --list` prints one quoted name per line. Anything that is not
+// a bare identifier (a header, an error, a stray blank) is dropped, so a
+// failed call yields an empty list rather than a grid of garbage.
+function parseSlashModes(raw) {
+    var out = []
+    var lines = String(raw || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+        var l = lines[i].trim().replace(/,$/, "").replace(/^"/, "").replace(/"$/, "").trim()
+        if (!/^[A-Za-z][A-Za-z0-9]*$/.test(l)) continue
+        out.push(l)
+    }
+    return out
+}
+
+// asusctl has no `slash --get`, so the current state comes from asusd itself.
+// The Slash interface hangs off the aura *device* object, whose last path
+// element is the device id ("19b6_3_4" here) and so differs per model — hence
+// discovering the path rather than hardcoding it.
+//
+// DeviceState is used in preference to the individual properties because the
+// .Mode property reads back a stale 0 on asusd 6.3.8 no matter the real mode,
+// while the DeviceState tuple is correct.
+var slashStateScript =
+    'p=$(busctl --system tree xyz.ljones.Asusd 2>/dev/null ' +
+    '| grep -o "/xyz/ljones/aura/[A-Za-z0-9_]*" | head -1); ' +
+    '[ -n "$p" ] && busctl --system call xyz.ljones.Asusd "$p" ' +
+    'xyz.ljones.Slash DeviceState 2>/dev/null'
+
+function slashStateCommand() { return ["sh", "-c", slashStateScript] }
+
+// "byyu true 255 0 15" -> enabled, brightness (0-255), interval (0-5), and the
+// mode as an index into the `--list` order. `available` stays false when the
+// call produced nothing, which is how a laptop with no ledbar — or an asusd
+// too old to expose it — is told apart from one that is simply switched off.
+function parseSlashState(raw) {
+    var r = { available: false, enabled: false, brightness: 255, interval: 0, mode: -1 }
+    var m = String(raw || "").trim().match(/^byyu\s+(true|false)\s+(\d+)\s+(\d+)\s+(\d+)/)
+    if (!m) return r
+    r.available = true
+    r.enabled = m[1] === "true"
+    r.brightness = clamp(parseInt(m[2]), 0, 255)
+    r.interval = clamp(parseInt(m[3]), 0, 5)
+    r.mode = parseInt(m[4])
+    return r
+}
+
+function slashModeCommand(name) { return ["asusctl", "slash", "--mode", String(name)] }
+function slashEnableCommand(on) { return ["asusctl", "slash", on ? "--enable" : "--disable"] }
+function slashBrightnessCommand(v) { return ["asusctl", "slash", "--brightness", String(clamp(Math.round(v), 0, 255))] }
+function slashIntervalCommand(v) { return ["asusctl", "slash", "--interval", String(clamp(Math.round(v), 0, 5))] }
+
+// ---------------------------------------------------------------- preview
+// Deterministic pseudo-noise. The flicker animations need scatter that holds
+// still between repaints of the same frame — Math.random() would re-roll on
+// every paint and turn them into uniform mush.
+function slashNoise(i, step) {
+    var v = Math.sin(i * 12.9898 + step * 78.233) * 43758.5453
+    return v - Math.floor(v)
+}
+
+// One frame of the preview strip: `n` segment brightnesses in [0,1] for
+// animation `anim` at loop position `phase`.
+//
+// ORIENTATION: index 0 (the left end of the strip) is the BOTTOM of the
+// physical ledbar, and index n-1 (the right end) is the TOP. Every travelling
+// animation here is written against that mapping, so a preview running left to
+// right is running bottom to top on the lid. Getting this backwards is the
+// easiest way to make a correct animation look wrong.
+//
+// These are stylised impressions, not the firmware's real frames — asusd
+// exposes no way to read those back. They exist so the grid can be picked from
+// by eye instead of by guessing what "Interfacing" means. Where a mode below
+// carries a note, it is because the shape was corrected against the real
+// ledbar rather than guessed.
+function slashPreviewLevels(anim, phase, n) {
+    var p = phase - Math.floor(phase)
+    var out = []
+    for (var i = 0; i < n; i++) {
+        var x = n > 1 ? i / (n - 1) : 0
+        var v = 0
+        if (anim === "bounce") {
+            var head = p < 0.5 ? p * 2 : (1 - p) * 2
+            v = 1 - Math.abs(x - head) / 0.16
+        } else if (anim === "sweep") {
+            // Bright head with a tail trailing behind it, wrapping at the end.
+            var tail = (p - x + 1) % 1
+            v = tail < 0.3 ? 1 - tail / 0.3 : 0
+        } else if (anim === "fill") {
+            v = x <= p ? 1 : 0.06
+        } else if (anim === "bits") {
+            v = slashNoise(i, Math.floor(p * 12)) > 0.55 ? 1 : 0.06
+        } else if (anim === "flicker") {
+            v = slashNoise(i, Math.floor(p * 24)) > 0.35 ? 1 : 0.04
+        } else if (anim === "burst") {
+            v = slashNoise(Math.floor(i / 3), Math.floor(p * 8)) > 0.4 ? 1 : 0.06
+        } else if (anim === "converge") {
+            // Flow. Not a travelling wave: on the real bar two points run in
+            // from both ends, meet in the middle, and run back out.
+            var t = p < 0.5 ? p * 2 : (1 - p) * 2
+            var lo = t * 0.5, hi = 1 - t * 0.5
+            v = Math.max(1 - Math.abs(x - lo) / 0.16, 1 - Math.abs(x - hi) / 0.16)
+        } else if (anim === "breathe") {
+            v = 0.15 + 0.85 * (0.5 + 0.5 * Math.sin(p * 2 * Math.PI))
+        } else if (anim === "phantom") {
+            var soft = p < 0.5 ? p * 2 : (1 - p) * 2
+            v = 1 - Math.abs(x - soft) / 0.5
+        } else if (anim === "spectrum") {
+            // Two beats. The first was missing entirely: the real effect opens
+            // with a wipe down from the top of the bar and only then settles
+            // into the cycling band. Top is the right-hand end, so the wipe
+            // fills from x = 1 downwards.
+            if (p < 0.4) {
+                var head = 1 - p / 0.4
+                v = x >= head ? 1 : 0.06
+            } else {
+                var q = (p - 0.4) / 0.6
+                v = 0.35 + 0.65 * (0.5 + 0.5 * Math.cos((x - q) * 2 * Math.PI))
+            }
+        } else if (anim === "hazard") {
+            // Read off an ASUS animation capture. Not the alternating blocks
+            // the name suggests: bands are born at the middle and migrate out
+            // to both ends, mirrored about the centre, with a full-bar flash
+            // partway through and dark stretches at each end of the cycle.
+            var d = Math.abs(x - 0.5) * 2
+            if (p < 0.20 || p > 0.88) v = 0.05
+            else if (p > 0.55 && p < 0.62) v = 1
+            else {
+                var band = (d - (p - 0.20) * 1.5 + 4) % 0.42
+                v = band < 0.14 ? 1 : 0.05
+            }
+        } else if (anim === "ramp") {
+            // Ramp climbs towards the top and drops back. A bare sawtooth put
+            // the reset as a hard edge mid-bar, which read as a glitch rather
+            // than as the ramp restarting; the short fall-off softens it.
+            var r = (x - p + 1) % 1
+            v = r < 0.9 ? r / 0.9 : (1 - r) / 0.1
+        } else if (anim === "gameover") {
+            // Read frame by frame off an ASUS animation capture. Nothing like
+            // the full-bar flashing the name suggests: it stays symmetric
+            // about the middle throughout and runs in beats — the outer
+            // quarters light and hold, the middle then takes over, the whole
+            // bar joins, and it blinks down to a stub before settling full.
+            var outer = x < 0.28 || x > 0.72
+            var inner = x >= 0.25 && x <= 0.75
+            if (p < 0.07)      v = 0.05
+            else if (p < 0.45) v = outer ? 1 : 0.05
+            else if (p < 0.63) v = inner ? 1 : 0.05
+            else if (p < 0.72) v = 1
+            else if (p < 0.76) v = (x > 0.42 && x < 0.58) ? 1 : 0.05
+            else if (p < 0.80) v = 0.05
+            else               v = 1
+        } else if (anim === "strobe") {
+            v = (Math.floor(p * 20) % 2) === 0 ? 1 : 0.05
+        } else {
+            v = 1
+        }
+        out.push(clamp(v, 0, 1))
+    }
+    return out
 }
 
 // ============================================================

@@ -129,9 +129,87 @@ assert.deepEqual(M.parseHyprmoncfgStatus(""), { managed: false, profile: "" })
 assert.deepEqual(M.parseHyprmoncfgStatus("command not found"), { managed: false, profile: "" })
 
 // ---------------------------------------------------------------- gpu mode
-assert.equal(M.gpuModeId(0, 0), "standard")
-assert.equal(M.gpuModeId(0, 1), "eco")
-assert.equal(M.gpuModeId(1, 0), "ultimate")
+// Polarity per the kernel ABI (sysfs-platform-asus-wmi): gpu_mux_mode is
+// 0 = Discrete, 1 = Optimus/Hybrid — the opposite way round to every other
+// toggle, so it gets asserted in both directions.
+assert.equal(M.gpuModeId(1, 0, true), "standard")   // hybrid, dGPU on demand
+assert.equal(M.gpuModeId(1, 1, true), "eco")        // hybrid, dGPU disabled
+assert.equal(M.gpuModeId(0, 0, true), "ultimate")   // MUX routed to the dGPU
+
+// A laptop with no MUX never reports the attribute, so mux is only the
+// caller's default 0 — which must not be mistaken for discrete mode.
+assert.equal(M.gpuModeId(0, 0, false), "standard")
+assert.equal(M.gpuModeId(0, 1, false), "eco")
+
+// The mode table has to agree with the reader, or the button that writes a
+// mode and the highlight that reads it back disagree after a reboot.
+;["eco", "standard", "ultimate"].forEach(function (id) {
+    const def = M.gpuModeDef(id)
+    assert.equal(M.gpuModeId(def.mux, def.dgpuDisable, true), id)
+})
+
+// ------------------------------------------------------------ pending gpu
+// asusd reports its queue per attribute, -1 meaning nothing queued. Verbatim
+// shape of the busctl round-trip in Model.queuedGpuScript.
+assert.deepEqual(M.parseQueuedGpu("gpu_mux_mode=-1\ndgpu_disable=0\n"),
+    { gpu_mux_mode: -1, dgpu_disable: 0 })
+// A daemon too old to expose the property, or no busctl at all, must read as
+// "nothing queued" rather than as a queued 0.
+assert.deepEqual(M.parseQueuedGpu(""), { gpu_mux_mode: -1, dgpu_disable: -1 })
+assert.deepEqual(M.parseQueuedGpu("gpu_mux_mode=\ndgpu_disable=junk"),
+    { gpu_mux_mode: -1, dgpu_disable: -1 })
+
+// Nothing queued -> no pending mode.
+assert.equal(M.pendingGpuModeId(1, 0, true, { gpu_mux_mode: -1, dgpu_disable: -1 }), "")
+// Queued from Eco back to Standard: dgpu_disable 1 -> 0, mux untouched.
+assert.equal(M.pendingGpuModeId(1, 1, true, { gpu_mux_mode: -1, dgpu_disable: 0 }), "standard")
+// Queued into Eco from Standard.
+assert.equal(M.pendingGpuModeId(1, 0, true, { gpu_mux_mode: -1, dgpu_disable: 1 }), "eco")
+// A queued mux change alone still lands on the current dgpu_disable, so
+// Standard -> mux 0 is Ultimate, and it must not be read against a default 0.
+assert.equal(M.pendingGpuModeId(1, 0, true, { gpu_mux_mode: 0, dgpu_disable: -1 }), "ultimate")
+// Queued value that matches the live state is not a pending change.
+assert.equal(M.pendingGpuModeId(1, 1, true, { gpu_mux_mode: -1, dgpu_disable: 1 }), "")
+// A missing or malformed queue object must not throw.
+assert.equal(M.pendingGpuModeId(1, 0, true, null), "")
+
+// ------------------------------------------------------- queueing a mode
+const BOTH = { gpuMux: true, dgpuDisable: true }
+const NOTHING_QUEUED = { gpu_mux_mode: -1, dgpu_disable: -1 }
+
+// Live Standard. Eco only needs dgpu_disable; Ultimate only needs the mux.
+assert.deepEqual(M.gpuModeCommand(M.gpuModeDef("eco"), NOTHING_QUEUED, 1, 0, BOTH),
+    ["sh", "-c", "asusctl armoury set dgpu_disable 1"])
+assert.deepEqual(M.gpuModeCommand(M.gpuModeDef("ultimate"), NOTHING_QUEUED, 1, 0, BOTH),
+    ["sh", "-c", "asusctl armoury set gpu_mux_mode 0"])
+// Already there, nothing queued: no command at all.
+assert.equal(M.gpuModeCommand(M.gpuModeDef("standard"), NOTHING_QUEUED, 1, 0, BOTH), null)
+
+// The Standard -> Eco -> Ultimate -> Eco walk. After Eco and Ultimate the
+// queue holds dgpu_disable=1 and gpu_mux_mode=0 while the firmware still
+// reads live Standard. Clicking Eco has to re-queue the mux back to Optimus:
+// comparing against the live value would see mux 1 == 1, write nothing, and
+// let the queued Discrete from the Ultimate click boot into Ultimate.
+const AFTER_ULTIMATE = { gpu_mux_mode: 0, dgpu_disable: 1 }
+assert.deepEqual(M.gpuModeCommand(M.gpuModeDef("eco"), AFTER_ULTIMATE, 1, 0, BOTH),
+    ["sh", "-c", "asusctl armoury set gpu_mux_mode 1"])
+assert.equal(M.pendingGpuModeId(1, 0, true, { gpu_mux_mode: 1, dgpu_disable: 1 }), "eco")
+
+// Going back to the live mode with something queued must cancel that queue,
+// not decide there is nothing to do because the firmware already agrees.
+assert.deepEqual(M.gpuModeCommand(M.gpuModeDef("standard"), AFTER_ULTIMATE, 1, 0, BOTH),
+    ["sh", "-c", "asusctl armoury set gpu_mux_mode 1 && asusctl armoury set dgpu_disable 0"])
+
+// A mode needing both attributes is reachable in one press.
+assert.deepEqual(M.gpuModeCommand(M.gpuModeDef("eco"), NOTHING_QUEUED, 0, 0, BOTH),
+    ["sh", "-c", "asusctl armoury set gpu_mux_mode 1 && asusctl armoury set dgpu_disable 1"])
+
+// Unsupported attributes are never written: on a mux-less laptop Eco is just
+// the dgpu_disable half, and Ultimate has nothing it may legally do.
+const NO_MUX = { gpuMux: false, dgpuDisable: true }
+assert.deepEqual(M.gpuModeCommand(M.gpuModeDef("eco"), NOTHING_QUEUED, 0, 0, NO_MUX),
+    ["sh", "-c", "asusctl armoury set dgpu_disable 1"])
+assert.equal(M.gpuModeCommand(M.gpuModeDef("ultimate"), NOTHING_QUEUED, 0, 0, NO_MUX), null)
 
 // ---------------------------------------------------------------- features
 // asusctl 6.x names the charge limit ChargeControlEndThreshold; matching only
@@ -159,5 +237,184 @@ assert.equal(M.serializeFanPoints(pts), "30c:1%,49c:2%,60c:40%")
 // Dragging past a neighbour reorders instead of crossing, and stays in bounds.
 const moved = M.moveFanPoint(pts, 0, 200, -5)
 assert.deepEqual(moved[moved.length - 1], { temp: 100, speed: 0 })
+
+// ---------------------------------------------------------------- slash
+// Verbatim `asusctl slash list` output (asusctl 6.4.0, ROG Zephyrus G14
+// GA403WM — the subcommand form, not the old `slash --list` flag). The order
+// matters as much as the names: it is the index space `slash get`'s Mode
+// name is resolved against.
+const SLASH_LIST = `Static
+Bounce
+Slash
+Loading
+BitStream
+Transmission
+Flow
+Flux
+Phantom
+Spectrum
+Hazard
+Interfacing
+Ramp
+GameOver
+Start
+Buzzer
+`
+const sm = M.parseSlashModes(SLASH_LIST)
+assert.equal(sm.length, 16)
+assert.equal(sm[0], "Static")
+assert.equal(sm[15], "Buzzer")
+assert.equal(sm.indexOf("Spectrum"), 9)
+// Noise (a header line, an error, a blank) never becomes a mode tile.
+assert.deepEqual(M.parseSlashModes("Error: no such device\n\n"), [])
+assert.deepEqual(M.parseSlashModes(""), [])
+
+// Verbatim `asusctl slash get` output (asusctl 6.4.0) — replaced the old
+// busctl DeviceState workaround once the CLI grew a real `get`.
+const st = M.parseSlashState(`Slash LED: enabled
+Brightness: 255
+Interval: 0
+Mode: Buzzer
+Show on boot: true
+Show on shutdown: true
+Show on sleep: true
+Show on battery: true
+Show battery warning: false
+`, sm)
+assert.equal(st.available, true)
+assert.equal(st.enabled, true)
+assert.equal(st.brightness, 255)
+assert.equal(st.interval, 0)
+assert.equal(st.mode, 15)
+assert.equal(sm[st.mode], "Buzzer")
+assert.deepEqual(M.parseSlashState(`Slash LED: disabled
+Brightness: 100
+Interval: 3
+Mode: Spectrum
+`, sm), { available: true, enabled: false, brightness: 100, interval: 3, mode: 9 })
+// No ledbar, or an asusd too old to expose one, must read as unavailable
+// rather than as a switched-off ledbar — the panel keeps its last known state
+// on `available: false` instead of snapping to a fabricated one.
+assert.equal(M.parseSlashState("", sm).available, false)
+assert.equal(M.parseSlashState("Unknown object '/xyz/ljones/Slash'", sm).available, false)
+
+// hasSlash matches the full interface name: "Slash" alone is also the name of
+// one of the ledbar's own animations.
+const SLASH_INFO = `Supported Core Functions:
+[
+    "xyz.ljones.Platform",
+    "xyz.ljones.Aura",
+    "xyz.ljones.Slash",
+]
+`
+assert.equal(M.parseSupportedFeatures(SLASH_INFO).hasSlash, true)
+assert.equal(M.parseSupportedFeatures(INFO).hasSlash, false)
+// The word on its own (here, an animation name) is not a device.
+assert.equal(M.parseSupportedFeatures("Supported Aura Modes:\n[\n    Slash,\n]").hasSlash, false)
+
+assert.deepEqual(M.slashModeCommand("Ramp"), ["asusctl", "slash", "set", "--mode", "Ramp"])
+assert.deepEqual(M.slashEnableCommand(true), ["asusctl", "slash", "set", "--enable"])
+assert.deepEqual(M.slashEnableCommand(false), ["asusctl", "slash", "set", "--disable"])
+// Out-of-range values are clamped to the firmware's ranges rather than passed
+// through for asusctl to reject.
+assert.deepEqual(M.slashBrightnessCommand(999), ["asusctl", "slash", "set", "--brightness", "255"])
+assert.deepEqual(M.slashBrightnessCommand(-5), ["asusctl", "slash", "set", "--brightness", "0"])
+assert.deepEqual(M.slashIntervalCommand(9), ["asusctl", "slash", "set", "--interval", "5"])
+
+// Every mode asusctl lists has its own description and preview animation, so
+// no tile falls back to the "no description for it yet" placeholder.
+sm.forEach(function(name) {
+    const d = M.slashModeDef(name)
+    assert.equal(d.name, name)
+    assert.ok(d.tip.indexOf("no description") < 0, name + " has no tooltip copy")
+    assert.ok(d.icon.length > 0, name + " has no icon")
+})
+// A mode from a newer asusctl still gets a usable tile.
+const unknown = M.slashModeDef("Wormhole")
+assert.equal(unknown.anim, "static")
+assert.ok(unknown.tip.indexOf("Wormhole") === 0)
+
+// Preview frames stay in range for every animation, at every phase, and are
+// deterministic — the flicker modes must not re-roll between repaints of the
+// same frame or they animate into uniform mush.
+sm.forEach(function(name) {
+    const anim = M.slashModeDef(name).anim
+    for (let ph = 0; ph < 1; ph += 0.05) {
+        const lv = M.slashPreviewLevels(anim, ph, 20)
+        assert.equal(lv.length, 20, name)
+        lv.forEach(function(v) {
+            assert.ok(v >= 0 && v <= 1 && !isNaN(v), name + " @" + ph + " -> " + v)
+        })
+        assert.deepEqual(M.slashPreviewLevels(anim, ph, 20), lv, name + " is not deterministic")
+    }
+})
+// Provenance. The firmware animates the bar itself, so the real frames cannot
+// be read back and each shape is either watched or guessed. The split is
+// asserted so it cannot rot silently: a mode gets confirmed by dropping its
+// `guess` flag, and that has to be a deliberate edit, not a drift.
+;(function () {
+    const confirmed = ["Static", "BitStream", "Phantom", "Interfacing", "Flow", "Spectrum", "Ramp", "GameOver", "Hazard"]
+    const guessed = ["Bounce", "Slash", "Loading", "Transmission", "Flux", "Start", "Buzzer"]
+    assert.equal(confirmed.length + guessed.length, sm.length, "every listed mode is accounted for")
+    confirmed.forEach(function (n) { assert.equal(M.slashModeDef(n).guess, false, n + " is confirmed") })
+    guessed.forEach(function (n) { assert.equal(M.slashModeDef(n).guess, true, n + " is only a guess") })
+    // A guessed preview says so where the user can see it, not just in a comment.
+    assert.ok(M.slashModeDef("Bounce").tip.indexOf("Preview approximate") > 0)
+    assert.ok(M.slashModeDef("Phantom").tip.indexOf("Preview approximate") < 0)
+})()
+
+// Shapes corrected against the real ledbar (reported from hardware), not
+// guessed. Left of the strip is the BOTTOM of the physical bar, right is the
+// TOP — a travelling animation running left-to-right runs bottom-to-top.
+//
+// Flow is not a travelling wave: two points run in from both ends, meet in the
+// middle, then head back out. So the frame is symmetric at every phase, and
+// the middle is brightest exactly when the ends are dimmest.
+;(function () {
+    const mid = M.slashPreviewLevels("converge", 0.5, 21)
+    // Compared with a tolerance: the two heads are computed from opposite ends
+    // so mirrored pairs land ~1e-16 apart, which deepEqual would fail on.
+    mid.forEach(function (v, i) {
+        assert.ok(Math.abs(v - mid[mid.length - 1 - i]) < 1e-9, "Flow must stay symmetric")
+    })
+    assert.ok(mid[10] > 0.9, "Flow: the two heads must meet in the middle")
+    assert.ok(mid[0] < 0.1 && mid[20] < 0.1, "Flow: ends dark once met")
+    const ends = M.slashPreviewLevels("converge", 0, 21)
+    assert.ok(ends[0] > 0.9 && ends[20] > 0.9, "Flow: heads start at the ends")
+    assert.ok(ends[10] < 0.1, "Flow: middle dark when the heads are apart")
+})()
+
+// Spectrum opens with a wipe DOWN from the top before the cycling band. Only
+// the band half was implemented at first, which read as starting mid-effect.
+;(function () {
+    const early = M.slashPreviewLevels("spectrum", 0.05, 20)
+    assert.ok(early[19] > 0.9, "Spectrum: the wipe starts at the top")
+    assert.ok(early[0] < 0.1, "Spectrum: the bottom is not lit yet")
+    const later = M.slashPreviewLevels("spectrum", 0.3, 20)
+    const litEarly = early.filter(function (v) { return v > 0.5 }).length
+    const litLater = later.filter(function (v) { return v > 0.5 }).length
+    assert.ok(litLater > litEarly, "Spectrum: the wipe must travel downwards")
+})()
+
+// Ramp climbs towards the top. A bare sawtooth put a hard reset edge mid-bar
+// that read as a glitch, so the wrap falls off over a short run instead.
+;(function () {
+    const f = M.slashPreviewLevels("ramp", 0, 20)
+    let maxJump = 0
+    for (let i = 1; i < f.length; i++) maxJump = Math.max(maxJump, Math.abs(f[i] - f[i - 1]))
+    assert.ok(maxJump < 0.7, "Ramp: no hard sawtooth edge (jump " + maxJump.toFixed(2) + ")")
+})()
+
+// Static is the only one fully lit at every phase; the rest actually move,
+// which is the whole point of the preview. Checked across the whole loop
+// rather than at two arbitrary phases — the slower blinks (Hazard, GameOver)
+// hold a frame long enough for any two given samples to land on the same one.
+assert.deepEqual(M.slashPreviewLevels("static", 0.4, 3), [1, 1, 1])
+sm.filter(function(n) { return M.slashModeDef(n).anim !== "static" }).forEach(function(name) {
+    const anim = M.slashModeDef(name).anim
+    const frames = new Set()
+    for (let ph = 0; ph < 1; ph += 0.02) frames.add(M.slashPreviewLevels(anim, ph, 20).join())
+    assert.ok(frames.size > 1, anim + " does not animate")
+})
 
 console.log("ok - all Model.js checks passed")

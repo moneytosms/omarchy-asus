@@ -220,6 +220,10 @@ Panel {
     readonly property var tabs: {
         var t = [{ key: "main", label: "Main" }]
         if (root.supported.hasAura || !root.infoLoaded) t.push({ key: "rgb", label: "RGB" })
+        // Always offered: the tab is what carries the "this laptop has no
+        // ledbar" message, so hiding it would be the silent omission the
+        // greying-out exists to avoid.
+        t.push({ key: "slash", label: "Slash" })
         if (root.supported.hasFanCurve || !root.infoLoaded) t.push({ key: "fan", label: "Fan" })
         t.push({ key: "advanced", label: "Advanced" })
         return t
@@ -256,6 +260,25 @@ Panel {
     readonly property bool needsColor2: effectDef.params.indexOf("color2") >= 0
     readonly property bool needsSpeed: effectDef.params.indexOf("speed") >= 0
     readonly property bool needsDirection: effectDef.params.indexOf("direction") >= 0
+
+    // Slash ledbar — the lid LED strip on Zephyrus (and some Strix) models.
+    // The mode list comes from `asusctl slash list` and the live state from
+    // `asusctl slash get`; slashModeIndex is an index into that same list,
+    // which is why the two are never mixed with a hardcoded table (see Model.js).
+    property var slashModes: []
+    property bool slashEnabled: false
+    property int slashBrightness: 255
+    property int slashInterval: 0
+    property int slashModeIndex: -1
+    readonly property string slashMode: slashModeIndex >= 0 && slashModeIndex < slashModes.length ? slashModes[slashModeIndex] : ""
+    // Which mode the preview strip plays: whatever the pointer is over, so the
+    // grid can be browsed by eye, falling back to the active one on the way out
+    // rather than going blank.
+    property string slashHoverMode: ""
+    readonly property var slashPreviewDef: Model.slashModeDef(slashHoverMode || slashMode || "Static")
+    // Loop position of the preview animation, advanced by the timer inside
+    // the preview strip while that strip is on screen.
+    property real slashPhase: 0
 
     // Fan curves
     property bool cpuFanEnabled: false
@@ -294,8 +317,16 @@ Panel {
 
     // GPU mode is derived from the mux/dgpu pair rather than stored, so it
     // can never drift out of sync with what the firmware actually reports.
-    readonly property string gpuMode: Model.gpuModeId(gpuMux, dgpuDisable)
+    readonly property string gpuMode: Model.gpuModeId(gpuMux, dgpuDisable, armourySupported.gpuMux)
     readonly property bool hasGpuMode: armourySupported.gpuMux || armourySupported.dgpuDisable
+
+    // What asusd has queued for the next boot, and the mode that lands the
+    // laptop in — "" when nothing is pending. Both GPU attributes only take
+    // effect at boot, so without this the row reads as if the click failed.
+    property var queuedGpu: ({ gpu_mux_mode: -1, dgpu_disable: -1 })
+    readonly property string pendingGpuMode: Model.pendingGpuModeId(gpuMux, dgpuDisable, armourySupported.gpuMux, queuedGpu)
+    // Same amber the temperature ramp uses for "warm" — a caution, not an error.
+    readonly property color pendingColor: "#ffcc44"
 
     readonly property bool showBatteryLimit: setting("showBatteryLimit", true) === true
     readonly property int refreshInterval: Math.max(5, Math.min(60, Number(setting("refreshIntervalSec", 10)) || 10)) * 1000
@@ -306,7 +337,9 @@ Panel {
         if (!infoProc.running) infoProc.running = true
         if (supported.hasBattery && !batteryProc.running) batteryProc.running = true
         if (!ledProc.running) ledProc.running = true
+        if (supported.hasSlash && !slashStateProc.running) slashStateProc.running = true
         if (!armouryProc.running) armouryProc.running = true
+        if (!queuedGpuProc.running) queuedGpuProc.running = true
         if (!monitorProc.running) monitorProc.running = true
         if (hyprmoncfgAvailable && !hyprmoncfgProc.running) hyprmoncfgProc.running = true
         if (supported.hasFanCurve) { if (!fanDetailProc.running) fanDetailProc.running = true }
@@ -344,6 +377,15 @@ Panel {
     function setLedBrightness(level) { ledBrightness = level; actionProc.command = ["asusctl", "leds", "set", level]; actionProc.running = true }
     function setBatteryLimit(l) { if (!supported.hasBattery) return; var c = Math.max(20, Math.min(100, Math.round(l))); actionProc.command = ["asusctl", "battery", "limit", String(c)]; actionProc.running = true }
 
+    // Slash ledbar. Every write goes through asusctl rather than the writable
+    // D-Bus properties, matching the rest of the panel; the state read that
+    // follows (see actionProc.onExited) is what moves the UI, so a rejected
+    // call leaves the controls showing the hardware's real state.
+    function setSlashMode(name) { if (!supported.hasSlash || !name) return; actionProc.command = Model.slashModeCommand(name); actionProc.running = true }
+    function setSlashEnabled(on) { if (!supported.hasSlash) return; slashEnabled = on; actionProc.command = Model.slashEnableCommand(on); actionProc.running = true }
+    function setSlashBrightness(v) { if (!supported.hasSlash) return; slashBrightness = Model.clamp(Math.round(v), 0, 255); actionProc.command = Model.slashBrightnessCommand(slashBrightness); actionProc.running = true }
+    function setSlashInterval(v) { if (!supported.hasSlash) return; slashInterval = Model.clamp(Math.round(v), 0, 5); actionProc.command = Model.slashIntervalCommand(slashInterval); actionProc.running = true }
+
     // Fan curves — every write is gated on profileLoaded so an action never
     // silently lands on the wrong (hardcoded "Balanced") profile because the
     // real active profile hadn't loaded yet. This was the root cause of fan
@@ -360,7 +402,18 @@ Panel {
     }
     function selectFanProfile(p) { if (!p || p === fanProfile) return; fanEditProfile = p; if (!fanModProc.running) fanModProc.running = true }
 
-    function setArmouryAttr(a, v) { actionProc.command = ["asusctl", "armoury", "set", a, String(v)]; actionProc.running = true }
+    // asusctl 6.4 stores a written value for the PPT/NVIDIA tuning attributes
+    // but only ever applies it once profile tuning is enabled ("PPT config
+    // updated and will be applied when tuning is enabled") — silently
+    // otherwise. Enabling tuning inline here keeps these sliders doing what
+    // the click promised, same as before that gate existed.
+    readonly property var tuningGatedAttrs: ["ppt_pl1_spl", "ppt_pl2_sppt", "ppt_pl3_fppt", "nv_dynamic_boost", "nv_temp_target", "nv_tgp"]
+    function setArmouryAttr(a, v) {
+        actionProc.command = root.tuningGatedAttrs.indexOf(a) >= 0
+            ? ["sh", "-c", "asusctl profile tuning true && asusctl armoury set " + a + " " + String(v)]
+            : ["asusctl", "armoury", "set", a, String(v)]
+        actionProc.running = true
+    }
     function togglePanelOverdrive() { panelOverdrive = !panelOverdrive; setArmouryAttr("panel_overdrive", panelOverdrive ? 1 : 0) }
     function setPptPl1(v) { pptPl1 = Math.round(v); setArmouryAttr("ppt_pl1_spl", pptPl1) }
     function setPptPl2(v) { pptPl2 = Math.round(v); setArmouryAttr("ppt_pl2_sppt", pptPl2) }
@@ -379,17 +432,17 @@ Panel {
     // GPU mode — Eco/Standard/Ultimate collapse to the mux + dgpu_disable
     // pair. Only the attribute that actually changes is written, so an Eco
     // switch on a mux-less laptop is still a single valid call.
+    // The live gpuMux/dgpuDisable values are deliberately not updated here:
+    // they mirror what the firmware is running, which a queued write does not
+    // change until the next boot. The queued read that follows the write is
+    // what moves the pending marker, so the row never claims a switch that
+    // has not happened.
     function setGpuMode(id) {
-        var def = Model.gpuModeDef(id)
-        if (armourySupported.gpuMux && (def.mux === 1) !== gpuMux) {
-            gpuMux = def.mux === 1
-            setArmouryAttr("gpu_mux_mode", def.mux)
-            return
-        }
-        if (armourySupported.dgpuDisable && (def.dgpuDisable === 1) !== dgpuDisable) {
-            dgpuDisable = def.dgpuDisable === 1
-            setArmouryAttr("dgpu_disable", def.dgpuDisable)
-        }
+        if (actionProc.running) return
+        var cmd = Model.gpuModeCommand(Model.gpuModeDef(id), queuedGpu, gpuMux, dgpuDisable, armourySupported)
+        if (!cmd) return
+        actionProc.command = cmd
+        actionProc.running = true
     }
 
     // Applying a refresh rate is two steps where hyprmoncfg is managing
@@ -571,12 +624,40 @@ Panel {
                                     horizontalPadding: Style.spacing.controlPaddingX
                                     verticalPadding: Style.spacing.controlPaddingY
                                     bordered: true
-                                    active: root.gpuMode === modelData.id
+                                    // A queued mode is highlighted alongside the
+                                    // active one, so the click leaves a visible
+                                    // mark instead of appearing to do nothing.
+                                    active: root.gpuMode === modelData.id || root.pendingGpuMode === modelData.id
                                     onClicked: root.setGpuMode(modelData.id)
                                 }
                             }
                         }
                         Text { width: parent.width; text: Model.gpuModeDef(root.gpuMode).desc; wrapMode: Text.WordWrap; color: Qt.darker(root.bar.foreground, 1.4); font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption }
+
+                        // Neither GPU attribute applies until the next boot, so a
+                        // queued change says so and offers the reboot rather than
+                        // leaving the row looking like the click was dropped.
+                        Column { visible: root.pendingGpuMode !== ""; width: parent.width; spacing: Style.space(4)
+                            Text {
+                                width: parent.width
+                                text: "Pending reboot — " + Model.gpuModeDef(root.pendingGpuMode).name + " applies on next boot"
+                                wrapMode: Text.WordWrap
+                                color: root.pendingColor
+                                font.family: root.bar.fontFamily
+                                font.pixelSize: Style.font.caption
+                            }
+                            Button {
+                                text: "Reboot now"
+                                iconText: "\u{F0709}"; iconSize: Style.font.body
+                                tooltipText: "Reboot to apply the queued GPU mode.\nClosing your windows first, as Omarchy's own reboot does."
+                                fontSize: Style.font.bodySmall
+                                foreground: root.pendingColor; fontFamily: root.bar.fontFamily
+                                horizontalPadding: Style.spacing.controlPaddingX
+                                verticalPadding: Style.spacing.controlPaddingY
+                                bordered: true
+                                onClicked: if (!rebootProc.running) rebootProc.running = true
+                            }
+                        }
                     }
 
                     // SCREEN — refresh rate comes from Hyprland, overdrive from
@@ -624,6 +705,7 @@ Panel {
 
                 // ============================================================= RGB TAB
                 Column { visible: root.tabKey === "rgb"; width: parent.width; spacing: Style.space(8)
+
                     // Header with LED toggle
                     Row { width: parent.width
                         Text { text: "KEYBOARD RGB"; color: root.bar.foreground; font.family: root.bar.fontFamily; font.pixelSize: Style.font.subtitle; font.bold: true; anchors.verticalCenter: parent.verticalCenter; width: parent.width - ledSw.width - Style.space(8) }
@@ -753,6 +835,177 @@ Panel {
                         }
                         Text { width: parent.width; text: "asusctl does not report these back, so they show what this panel last set."; wrapMode: Text.WordWrap; color: Qt.darker(root.bar.foreground, 1.6); font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption }
                     }
+                }
+
+                // =========================================================== SLASH TAB
+                // Its own tab rather than the tail of RGB: it is a separate
+                // device with its own power, brightness and animation set, and
+                // it was landing below enough keyboard controls to need
+                // scrolling to find at all.
+                // The lid strip on Zephyrus models. Greyed rather than hidden
+                // on hardware without one, so the panel says "your laptop
+                // hasn't got this" instead of quietly omitting a feature the
+                // model line is known for.
+                Column {
+                    id: slashSection
+                    visible: root.tabKey === "slash"
+                    width: parent.width
+                    spacing: Style.space(6)
+                    enabled: root.supported.hasSlash
+                    opacity: enabled ? 1 : 0.4
+
+                        Row { width: parent.width
+                            Text { text: "SLASH LEDBAR"; color: root.bar.foreground; font.family: root.bar.fontFamily; font.pixelSize: Style.font.subtitle; font.bold: true; anchors.verticalCenter: parent.verticalCenter; width: parent.width - slashSw.width - Style.space(8) }
+                            Row { id: slashSw; spacing: Style.space(4); anchors.verticalCenter: parent.verticalCenter
+                                Rectangle { width: Style.space(14); height: Style.space(14); radius: Style.space(7); color: root.slashEnabled ? "#44cc44" : "#cc4444"; anchors.verticalCenter: parent.verticalCenter
+                                    SequentialAnimation on opacity { running: root.slashEnabled && slashSection.enabled; loops: Animation.Infinite; NumberAnimation { from: 1; to: 0.5; duration: 800 } NumberAnimation { from: 0.5; to: 1; duration: 800 } }
+                                }
+                                Text { text: root.slashEnabled ? "ON" : "OFF"; color: root.slashEnabled ? "#44cc44" : "#cc4444"; font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
+                                MouseArea { id: slashPowerMouse; width: Style.space(40); height: Style.space(20); anchors.verticalCenter: parent.verticalCenter; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.setSlashEnabled(!root.slashEnabled)
+                                    PanelToolTip { visible: slashPowerMouse.containsMouse; text: root.slashEnabled ? "The Slash ledbar is on. Click to turn it off." : "The Slash ledbar is off. Click to turn it on." }
+                                }
+                            }
+                        }
+
+                        // Says why the controls below are dead. Held back
+                        // until infoLoaded so a laptop that does have a ledbar
+                        // is not told otherwise during the first read.
+                        Text {
+                            visible: root.infoLoaded && !root.supported.hasSlash
+                            width: parent.width
+                            text: "This laptop has no Slash ledbar — asusctl reports no Slash device."
+                            wrapMode: Text.WordWrap
+                            color: Qt.darker(root.bar.foreground, 1.5)
+                            font.family: root.bar.fontFamily
+                            font.pixelSize: Style.font.caption
+                        }
+
+                        // Animated preview of the hovered (or active) mode.
+                        // One shared canvas rather than one per tile: sixteen
+                        // simultaneous animations is a lot of repainting for a
+                        // bar panel, and only the mode under the pointer is
+                        // being considered anyway.
+                        Rectangle {
+                            width: parent.width
+                            height: Style.space(30)
+                            radius: Style.cornerRadius
+                            color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.05)
+
+                            Canvas {
+                                id: slashCanvas
+                                anchors.fill: parent
+                                anchors.margins: Style.space(5)
+                                renderStrategy: Canvas.Immediate
+
+                                readonly property int segments: 20
+
+                                onPaint: {
+                                    var ctx = getContext("2d")
+                                    ctx.reset()
+                                    var n = segments
+                                    var levels = Model.slashPreviewLevels(root.slashPreviewDef.anim, root.slashPhase, n)
+                                    var gap = 2
+                                    var w = (width - gap * (n - 1)) / n
+                                    if (w <= 0) return
+                                    // The strip tracks brightness and the on/off
+                                    // state, so those two controls read off this
+                                    // preview as well. Floored below "off" so the
+                                    // mode is still legible with the bar dark.
+                                    var gain = root.slashEnabled ? 0.3 + 0.7 * (root.slashBrightness / 255) : 0.12
+                                    var fg = root.bar.foreground
+                                    for (var i = 0; i < n; i++) {
+                                        var a = 0.06 + 0.94 * levels[i] * gain
+                                        ctx.fillStyle = Qt.rgba(fg.r, fg.g, fg.b, a)
+                                        ctx.fillRect(i * (w + gap), 0, w, height)
+                                    }
+                                }
+                            }
+
+                            // Advances the loop. Runs only while this strip is
+                            // actually on screen — `visible` is the effective
+                            // one in Qt Quick, so switching tabs or closing the
+                            // panel stops the repaints.
+                            Timer {
+                                interval: 40
+                                running: root.opened && slashCanvas.visible
+                                repeat: true
+                                onTriggered: { root.slashPhase = (root.slashPhase + 0.02) % 1; slashCanvas.requestPaint() }
+                            }
+
+                            Text {
+                                anchors.bottom: parent.bottom; anchors.right: parent.right; anchors.margins: Style.space(2)
+                                text: root.slashPreviewDef.name
+                                color: Qt.darker(root.bar.foreground, 1.6)
+                                font.family: root.bar.fontFamily
+                                font.pixelSize: 8
+                            }
+                        }
+
+                        // Explicit power buttons. The coloured ON/OFF dot in the
+                        // header is a status readout that happens to be clickable,
+                        // which is not discoverable — this is the control.
+                        Row { width: parent.width; spacing: Style.space(4)
+                            Text { text: "Power"; color: Qt.darker(root.bar.foreground, 1.4); font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter; width: Style.space(52) }
+                            Button { width: (parent.width - Style.space(52) - Style.space(4) * 2) / 2; text: "On"; tooltipText: "Light the Slash ledbar."; fontSize: Style.font.caption; foreground: root.bar.foreground; fontFamily: root.bar.fontFamily; horizontalPadding: Style.spacing.controlPaddingX; verticalPadding: Style.spacing.controlPaddingY; bordered: true; active: root.slashEnabled; onClicked: root.setSlashEnabled(true) }
+                            Button { width: (parent.width - Style.space(52) - Style.space(4) * 2) / 2; text: "Off"; tooltipText: "Turn the Slash ledbar off completely."; fontSize: Style.font.caption; foreground: root.bar.foreground; fontFamily: root.bar.fontFamily; horizontalPadding: Style.spacing.controlPaddingX; verticalPadding: Style.spacing.controlPaddingY; bordered: true; active: !root.slashEnabled; onClicked: root.setSlashEnabled(false) }
+                        }
+
+                        // Mode grid — whatever `asusctl slash list` reports,
+                        // in its own order, so the index sent back by asusd
+                        // lines up with the tile that is highlighted.
+                        Grid { width: parent.width; columns: 3; spacing: Style.space(3)
+                            Repeater { model: root.slashModes
+                                Rectangle {
+                                    required property var modelData
+                                    required property int index
+                                    readonly property string modeName: String(modelData)
+                                    readonly property var def: Model.slashModeDef(modeName)
+                                    readonly property bool current: root.slashModeIndex === index
+                                    width: (parent.width - Style.space(3) * 2) / 3
+                                    height: Style.space(34)
+                                    radius: Style.cornerRadius
+                                    color: current ? Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.2) : Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.06)
+                                    border.width: current ? 2 : 1
+                                    border.color: current ? root.bar.foreground : "transparent"
+                                    Row { anchors.centerIn: parent; spacing: Style.space(4)
+                                        Text { text: def.icon; color: current ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.4); font.family: root.bar.fontFamily; font.pixelSize: Style.font.body }
+                                        Text { text: def.name; color: current ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.6); font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
+                                    }
+                                    MouseArea {
+                                        id: slashMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.setSlashMode(modeName)
+                                        onEntered: root.slashHoverMode = modeName
+                                        // Guarded so the pointer leaving one tile
+                                        // after entering the next does not clear
+                                        // the preview the next tile just set.
+                                        onExited: if (root.slashHoverMode === modeName) root.slashHoverMode = ""
+                                    }
+                                    PanelToolTip { visible: slashMouse.containsMouse; text: def.tip }
+                                }
+                            }
+                        }
+
+                        // Brightness is a 0-255 firmware value here, not the
+                        // keyboard's four steps, so it gets a slider.
+                        Column { width: parent.width; spacing: Style.space(4)
+                            Text { text: "Ledbar Brightness"; color: Qt.darker(root.bar.foreground, 1.4); font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+                            Row { width: parent.width; spacing: Style.space(4)
+                                PanelSlider { width: parent.width - Style.space(44) - Style.space(4); bar: root.bar; minimum: 0; maximum: 255; step: 5; integer: true; value: root.slashBrightness; onReleased: function(v) { root.setSlashBrightness(v) } }
+                                Text { text: root.slashBrightness; color: root.bar.foreground; font.family: root.bar.fontFamily; font.pixelSize: Style.font.body; font.bold: true; width: Style.space(44); horizontalAlignment: Text.AlignRight; anchors.verticalCenter: parent.verticalCenter }
+                            }
+                        }
+
+                        // Interval paces the animation, the way Speed does for
+                        // the aura effects above. 0 is the firmware default.
+                        Row { width: parent.width; spacing: Style.space(4)
+                            Text { text: "Interval"; color: Qt.darker(root.bar.foreground, 1.4); font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter; width: Style.space(52) }
+                            Repeater { model: [0, 1, 2, 3, 4, 5]
+                                Button { required property var modelData; width: (parent.width - Style.space(52) - Style.space(4) * 6) / 6; text: String(modelData); tooltipText: modelData === 0 ? "Default pacing for the animation." : "Slow the animation down by " + modelData + " step" + (modelData === 1 ? "" : "s") + "."; fontSize: Style.font.caption; foreground: root.bar.foreground; fontFamily: root.bar.fontFamily; horizontalPadding: Style.spacing.controlPaddingX; verticalPadding: Style.spacing.controlPaddingY; bordered: true; active: root.slashInterval === modelData; onClicked: root.setSlashInterval(modelData) }
+                            }
+                        }
                 }
 
                 // ============================================================= FAN TAB
@@ -916,9 +1169,37 @@ Panel {
 
     Process { id: checkAsusctl; command: ["which", "asusctl"]; onExited: function(ec) { root.asusctlAvailable = ec === 0; if (root.asusctlAvailable) refresh() } }
     Process { id: profileProc; command: ["asusctl", "profile", "get"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { var p = Model.parseCurrentProfile(text); if (p) { root.currentProfile = p; var i = root.profiles.indexOf(p); if (i >= 0) root.profileIndex = i }; root.acProfile = Model.parseProfiles(text); root.profileLoaded = true } } }
-    Process { id: infoProc; command: ["asusctl", "info", "--show-supported"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.supported = Model.parseSupportedFeatures(text); root.infoLoaded = true } } }
+    Process { id: infoProc; command: ["asusctl", "info", "--show-supported"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
+        root.supported = Model.parseSupportedFeatures(text)
+        root.infoLoaded = true
+        // Kick the slash reads here rather than waiting for the next refresh:
+        // hasSlash is only known once this has landed, so the first refresh
+        // always skipped them and the section stayed blank for a full tick.
+        //
+        // The mode list is fetched whatever this laptop supports, because the
+        // greyed-out section still shows the grid — a laptop without a ledbar
+        // is told what it is missing rather than shown an empty box. The state
+        // read is the one that needs a device to answer it.
+        if (root.slashModes.length === 0 && !slashListProc.running) slashListProc.running = true
+        if (root.supported.hasSlash && !slashStateProc.running) slashStateProc.running = true
+    } } }
     Process { id: batteryProc; command: ["asusctl", "battery", "info"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.batteryLimit = Model.parseBatteryInfo(text).limit } } }
     Process { id: ledProc; command: ["asusctl", "leds", "get"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.ledBrightness = Model.parseLedBrightness(text) } } }
+    // Fetched once — the animation list is a property of the asusctl build,
+    // not of anything that changes while the bar is running, and not of
+    // whether this particular laptop has a ledbar to play them on.
+    Process { id: slashListProc; command: Model.slashListCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.slashModes = Model.parseSlashModes(text) } } }
+    Process { id: slashStateProc; command: Model.slashStateCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
+        var st = Model.parseSlashState(text, root.slashModes)
+        // A call that returned nothing leaves the last known state alone: the
+        // controls keep reading what the hardware last reported instead of
+        // snapping to a fabricated "off, brightness 255, no mode".
+        if (!st.available) return
+        root.slashEnabled = st.enabled
+        root.slashBrightness = st.brightness
+        root.slashInterval = st.interval
+        root.slashModeIndex = st.mode
+    } } }
     Process {
         id: fanDetailProc
         command: ["asusctl", "fan-curve", "--get-enabled"]
@@ -992,7 +1273,9 @@ Panel {
     }
     Process { id: hyprmoncfgSaveProc; onExited: function() { if (!monitorProc.running) monitorProc.running = true } }
     Process { id: sensorProc; command: Model.sensorCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.sensors = Model.parseSensors(text) } } }
-    Process { id: actionProc; onExited: function() { if (!profileProc.running) profileProc.running = true; if (!batteryProc.running) batteryProc.running = true; if (!ledProc.running) ledProc.running = true; if (!armouryProc.running) armouryProc.running = true; if (!monitorProc.running) monitorProc.running = true; if (!fanDetailProc.running) fanDetailProc.running = true } }
+    Process { id: queuedGpuProc; command: Model.queuedGpuCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.queuedGpu = Model.parseQueuedGpu(text) } } }
+    Process { id: rebootProc; command: ["omarchy-system-reboot"] }
+    Process { id: actionProc; onExited: function() { if (!profileProc.running) profileProc.running = true; if (!batteryProc.running) batteryProc.running = true; if (!ledProc.running) ledProc.running = true; if (root.supported.hasSlash && !slashStateProc.running) slashStateProc.running = true; if (!armouryProc.running) armouryProc.running = true; if (!queuedGpuProc.running) queuedGpuProc.running = true; if (!monitorProc.running) monitorProc.running = true; if (!fanDetailProc.running) fanDetailProc.running = true } }
     Timer { interval: root.refreshInterval; running: root.opened && root.asusctlAvailable; repeat: true; onTriggered: root.refresh() }
 
     // Sensors run on their own, faster tick — the asusctl round-trip is much

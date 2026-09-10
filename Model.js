@@ -406,7 +406,7 @@ function parseLedBrightness(raw) {
 // ============================================================
 // Slash ledbar (the lid LED strip on Zephyrus and some Strix models)
 // ============================================================
-// The animation list is read from asusctl itself (`asusctl slash --list`)
+// The animation list is read from asusctl itself (`asusctl slash list`)
 // rather than hardcoded, because a name's *position* in that list is the value
 // asusd reports for the active mode. Reading both from the same source keeps
 // the name -> index mapping correct on an asusctl that adds an animation.
@@ -467,11 +467,14 @@ function slashModeDef(name) {
              tip: n + "\nReported by asusctl; this panel has no description for it yet." }
 }
 
-function slashListCommand() { return ["asusctl", "slash", "--list"] }
+// asusctl 6.3.9 changed the slash CLI from flags on the bare `slash` command
+// to subcommands (`list`/`get`/`set`) — these build the new argv.
+function slashListCommand() { return ["asusctl", "slash", "list"] }
 
-// `asusctl slash --list` prints one quoted name per line. Anything that is not
-// a bare identifier (a header, an error, a stray blank) is dropped, so a
-// failed call yields an empty list rather than a grid of garbage.
+// `asusctl slash list` prints one name per line (quoted on older asusctl).
+// Anything that is not a bare identifier (a header, an error, a stray blank)
+// is dropped, so a failed call yields an empty list rather than a grid of
+// garbage.
 function parseSlashModes(raw) {
     var out = []
     var lines = String(raw || "").split("\n")
@@ -483,42 +486,34 @@ function parseSlashModes(raw) {
     return out
 }
 
-// asusctl has no `slash --get`, so the current state comes from asusd itself.
-// The Slash interface hangs off the aura *device* object, whose last path
-// element is the device id ("19b6_3_4" here) and so differs per model — hence
-// discovering the path rather than hardcoding it.
-//
-// DeviceState is used in preference to the individual properties because the
-// .Mode property reads back a stale 0 on asusd 6.3.8 no matter the real mode,
-// while the DeviceState tuple is correct.
-var slashStateScript =
-    'p=$(busctl --system tree xyz.ljones.Asusd 2>/dev/null ' +
-    '| grep -o "/xyz/ljones/aura/[A-Za-z0-9_]*" | head -1); ' +
-    '[ -n "$p" ] && busctl --system call xyz.ljones.Asusd "$p" ' +
-    'xyz.ljones.Slash DeviceState 2>/dev/null'
+// asusctl 6.4 added a real `slash get`, which reports the mode by name and
+// no longer goes stale the way the old D-Bus .Mode property did on asusd
+// 6.3.8 — so the state read no longer needs the busctl DeviceState workaround
+// that used to live here.
+function slashStateCommand() { return ["asusctl", "slash", "get"] }
 
-function slashStateCommand() { return ["sh", "-c", slashStateScript] }
-
-// "byyu true 255 0 15" -> enabled, brightness (0-255), interval (0-5), and the
-// mode as an index into the `--list` order. `available` stays false when the
-// call produced nothing, which is how a laptop with no ledbar — or an asusd
-// too old to expose it — is told apart from one that is simply switched off.
-function parseSlashState(raw) {
+// "Slash LED: disabled\nBrightness: 255\nInterval: 0\nMode: BitStream\n..."
+// `modes` (the `slash list` order) turns the mode name into the index
+// Panel.qml keys slashModeIndex off. `available` stays false when the call
+// produced nothing, which is how a laptop with no ledbar — or an asusd too
+// old to expose it — is told apart from one that is simply switched off.
+function parseSlashState(raw, modes) {
     var r = { available: false, enabled: false, brightness: 255, interval: 0, mode: -1 }
-    var m = String(raw || "").trim().match(/^byyu\s+(true|false)\s+(\d+)\s+(\d+)\s+(\d+)/)
-    if (!m) return r
+    var text = String(raw || "")
+    if (text.indexOf("Slash LED:") < 0) return r
     r.available = true
-    r.enabled = m[1] === "true"
-    r.brightness = clamp(parseInt(m[2]), 0, 255)
-    r.interval = clamp(parseInt(m[3]), 0, 5)
-    r.mode = parseInt(m[4])
+    r.enabled = /Slash LED:\s*enabled/i.test(text)
+    var b = text.match(/Brightness:\s*(\d+)/); if (b) r.brightness = clamp(parseInt(b[1]), 0, 255)
+    var iv = text.match(/Interval:\s*(\d+)/); if (iv) r.interval = clamp(parseInt(iv[1]), 0, 5)
+    var m = text.match(/Mode:\s*(\S+)/)
+    if (m && Array.isArray(modes)) r.mode = modes.indexOf(m[1])
     return r
 }
 
-function slashModeCommand(name) { return ["asusctl", "slash", "--mode", String(name)] }
-function slashEnableCommand(on) { return ["asusctl", "slash", on ? "--enable" : "--disable"] }
-function slashBrightnessCommand(v) { return ["asusctl", "slash", "--brightness", String(clamp(Math.round(v), 0, 255))] }
-function slashIntervalCommand(v) { return ["asusctl", "slash", "--interval", String(clamp(Math.round(v), 0, 5))] }
+function slashModeCommand(name) { return ["asusctl", "slash", "set", "--mode", String(name)] }
+function slashEnableCommand(on) { return ["asusctl", "slash", "set", on ? "--enable" : "--disable"] }
+function slashBrightnessCommand(v) { return ["asusctl", "slash", "set", "--brightness", String(clamp(Math.round(v), 0, 255))] }
+function slashIntervalCommand(v) { return ["asusctl", "slash", "set", "--interval", String(clamp(Math.round(v), 0, 5))] }
 
 // ---------------------------------------------------------------- preview
 // Deterministic pseudo-noise. The flicker animations need scatter that holds

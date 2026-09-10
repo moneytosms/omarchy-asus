@@ -71,7 +71,7 @@ feature set where Linux tooling allows it. Where the two diverge:
 The lid strip on ROG Zephyrus (and some Strix) models, on its own tab. Three
 things make it different from every other control here:
 
-- **The mode list is read from `asusctl slash --list`, not hardcoded.** A
+- **The mode list is read from `asusctl slash list`, not hardcoded.** A
   name's *position* in that list is the value `asusd` reports for the active
   mode, so reading the names and the active index from the same source is what
   keeps the highlighted tile honest across `asusctl` versions.
@@ -212,10 +212,8 @@ asusctl armoury list
 
 # Slash ledbar: is one detected, and what is it doing right now?
 asusctl info --show-supported | grep Slash          # xyz.ljones.Slash = yes
-asusctl slash --list
-busctl --system call xyz.ljones.Asusd \
-  "$(busctl --system tree xyz.ljones.Asusd | grep -o '/xyz/ljones/aura/[A-Za-z0-9_]*' | head -1)" \
-  xyz.ljones.Slash DeviceState                      # enabled, brightness, interval, mode
+asusctl slash list
+asusctl slash get                                   # enabled, brightness, interval, mode
 ```
 
 ## License

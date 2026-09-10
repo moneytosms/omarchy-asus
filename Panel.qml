@@ -262,9 +262,9 @@ Panel {
     readonly property bool needsDirection: effectDef.params.indexOf("direction") >= 0
 
     // Slash ledbar — the lid LED strip on Zephyrus (and some Strix) models.
-    // The mode list comes from `asusctl slash --list` and the live state from
-    // asusd over D-Bus; slashModeIndex is an index into that same list, which
-    // is why the two are never mixed with a hardcoded table (see Model.js).
+    // The mode list comes from `asusctl slash list` and the live state from
+    // `asusctl slash get`; slashModeIndex is an index into that same list,
+    // which is why the two are never mixed with a hardcoded table (see Model.js).
     property var slashModes: []
     property bool slashEnabled: false
     property int slashBrightness: 255
@@ -402,7 +402,18 @@ Panel {
     }
     function selectFanProfile(p) { if (!p || p === fanProfile) return; fanEditProfile = p; if (!fanModProc.running) fanModProc.running = true }
 
-    function setArmouryAttr(a, v) { actionProc.command = ["asusctl", "armoury", "set", a, String(v)]; actionProc.running = true }
+    // asusctl 6.4 stores a written value for the PPT/NVIDIA tuning attributes
+    // but only ever applies it once profile tuning is enabled ("PPT config
+    // updated and will be applied when tuning is enabled") — silently
+    // otherwise. Enabling tuning inline here keeps these sliders doing what
+    // the click promised, same as before that gate existed.
+    readonly property var tuningGatedAttrs: ["ppt_pl1_spl", "ppt_pl2_sppt", "ppt_pl3_fppt", "nv_dynamic_boost", "nv_temp_target", "nv_tgp"]
+    function setArmouryAttr(a, v) {
+        actionProc.command = root.tuningGatedAttrs.indexOf(a) >= 0
+            ? ["sh", "-c", "asusctl profile tuning true && asusctl armoury set " + a + " " + String(v)]
+            : ["asusctl", "armoury", "set", a, String(v)]
+        actionProc.running = true
+    }
     function togglePanelOverdrive() { panelOverdrive = !panelOverdrive; setArmouryAttr("panel_overdrive", panelOverdrive ? 1 : 0) }
     function setPptPl1(v) { pptPl1 = Math.round(v); setArmouryAttr("ppt_pl1_spl", pptPl1) }
     function setPptPl2(v) { pptPl2 = Math.round(v); setArmouryAttr("ppt_pl2_sppt", pptPl2) }
@@ -939,7 +950,7 @@ Panel {
                             Button { width: (parent.width - Style.space(52) - Style.space(4) * 2) / 2; text: "Off"; tooltipText: "Turn the Slash ledbar off completely."; fontSize: Style.font.caption; foreground: root.bar.foreground; fontFamily: root.bar.fontFamily; horizontalPadding: Style.spacing.controlPaddingX; verticalPadding: Style.spacing.controlPaddingY; bordered: true; active: !root.slashEnabled; onClicked: root.setSlashEnabled(false) }
                         }
 
-                        // Mode grid — whatever `asusctl slash --list` reports,
+                        // Mode grid — whatever `asusctl slash list` reports,
                         // in its own order, so the index sent back by asusd
                         // lines up with the tile that is highlighted.
                         Grid { width: parent.width; columns: 3; spacing: Style.space(3)
@@ -1179,7 +1190,7 @@ Panel {
     // whether this particular laptop has a ledbar to play them on.
     Process { id: slashListProc; command: Model.slashListCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.slashModes = Model.parseSlashModes(text) } } }
     Process { id: slashStateProc; command: Model.slashStateCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
-        var st = Model.parseSlashState(text)
+        var st = Model.parseSlashState(text, root.slashModes)
         // A call that returned nothing leaves the last known state alone: the
         // controls keep reading what the hardware last reported instead of
         // snapping to a fabricated "off, brightness 255, no mode".

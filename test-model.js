@@ -239,51 +239,64 @@ const moved = M.moveFanPoint(pts, 0, 200, -5)
 assert.deepEqual(moved[moved.length - 1], { temp: 100, speed: 0 })
 
 // ---------------------------------------------------------------- slash
-// Verbatim `asusctl slash --list` output (asusctl 6.3.8, ROG Zephyrus G14
-// GA403WM). The order matters as much as the names: it is the index space
-// asusd reports the active mode in.
-const SLASH_LIST = `"Static"
-"Bounce"
-"Slash"
-"Loading"
-"BitStream"
-"Transmission"
-"Flow"
-"Flux"
-"Phantom"
-"Spectrum"
-"Hazard"
-"Interfacing"
-"Ramp"
-"GameOver"
-"Start"
-"Buzzer"
+// Verbatim `asusctl slash list` output (asusctl 6.4.0, ROG Zephyrus G14
+// GA403WM — the subcommand form, not the old `slash --list` flag). The order
+// matters as much as the names: it is the index space `slash get`'s Mode
+// name is resolved against.
+const SLASH_LIST = `Static
+Bounce
+Slash
+Loading
+BitStream
+Transmission
+Flow
+Flux
+Phantom
+Spectrum
+Hazard
+Interfacing
+Ramp
+GameOver
+Start
+Buzzer
 `
 const sm = M.parseSlashModes(SLASH_LIST)
 assert.equal(sm.length, 16)
 assert.equal(sm[0], "Static")
 assert.equal(sm[15], "Buzzer")
-// The index of a name here is what asusd's mode field carries.
 assert.equal(sm.indexOf("Spectrum"), 9)
 // Noise (a header line, an error, a blank) never becomes a mode tile.
 assert.deepEqual(M.parseSlashModes("Error: no such device\n\n"), [])
 assert.deepEqual(M.parseSlashModes(""), [])
 
-// `busctl call ... xyz.ljones.Slash DeviceState`, verbatim.
-const st = M.parseSlashState("byyu true 255 0 15\n")
+// Verbatim `asusctl slash get` output (asusctl 6.4.0) — replaced the old
+// busctl DeviceState workaround once the CLI grew a real `get`.
+const st = M.parseSlashState(`Slash LED: enabled
+Brightness: 255
+Interval: 0
+Mode: Buzzer
+Show on boot: true
+Show on shutdown: true
+Show on sleep: true
+Show on battery: true
+Show battery warning: false
+`, sm)
 assert.equal(st.available, true)
 assert.equal(st.enabled, true)
 assert.equal(st.brightness, 255)
 assert.equal(st.interval, 0)
 assert.equal(st.mode, 15)
 assert.equal(sm[st.mode], "Buzzer")
-assert.deepEqual(M.parseSlashState("byyu false 100 3 9"),
-    { available: true, enabled: false, brightness: 100, interval: 3, mode: 9 })
+assert.deepEqual(M.parseSlashState(`Slash LED: disabled
+Brightness: 100
+Interval: 3
+Mode: Spectrum
+`, sm), { available: true, enabled: false, brightness: 100, interval: 3, mode: 9 })
 // No ledbar, or an asusd too old to expose one, must read as unavailable
 // rather than as a switched-off ledbar — the panel keeps its last known state
 // on `available: false` instead of snapping to a fabricated one.
-assert.equal(M.parseSlashState("").available, false)
-assert.equal(M.parseSlashState("Unknown object '/xyz/ljones/Slash'").available, false)
+assert.equal(M.parseSlashState("", sm).available, false)
+assert.equal(M.parseSlashState("Unknown object '/xyz/ljones/Slash'", sm).available, false)
 
 // hasSlash matches the full interface name: "Slash" alone is also the name of
 // one of the ledbar's own animations.
@@ -299,14 +312,14 @@ assert.equal(M.parseSupportedFeatures(INFO).hasSlash, false)
 // The word on its own (here, an animation name) is not a device.
 assert.equal(M.parseSupportedFeatures("Supported Aura Modes:\n[\n    Slash,\n]").hasSlash, false)
 
-assert.deepEqual(M.slashModeCommand("Ramp"), ["asusctl", "slash", "--mode", "Ramp"])
-assert.deepEqual(M.slashEnableCommand(true), ["asusctl", "slash", "--enable"])
-assert.deepEqual(M.slashEnableCommand(false), ["asusctl", "slash", "--disable"])
+assert.deepEqual(M.slashModeCommand("Ramp"), ["asusctl", "slash", "set", "--mode", "Ramp"])
+assert.deepEqual(M.slashEnableCommand(true), ["asusctl", "slash", "set", "--enable"])
+assert.deepEqual(M.slashEnableCommand(false), ["asusctl", "slash", "set", "--disable"])
 // Out-of-range values are clamped to the firmware's ranges rather than passed
 // through for asusctl to reject.
-assert.deepEqual(M.slashBrightnessCommand(999), ["asusctl", "slash", "--brightness", "255"])
-assert.deepEqual(M.slashBrightnessCommand(-5), ["asusctl", "slash", "--brightness", "0"])
-assert.deepEqual(M.slashIntervalCommand(9), ["asusctl", "slash", "--interval", "5"])
+assert.deepEqual(M.slashBrightnessCommand(999), ["asusctl", "slash", "set", "--brightness", "255"])
+assert.deepEqual(M.slashBrightnessCommand(-5), ["asusctl", "slash", "set", "--brightness", "0"])
+assert.deepEqual(M.slashIntervalCommand(9), ["asusctl", "slash", "set", "--interval", "5"])
 
 // Every mode asusctl lists has its own description and preview animation, so
 // no tile falls back to the "no description for it yet" placeholder.

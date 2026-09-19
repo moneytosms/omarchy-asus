@@ -435,17 +435,21 @@ var presetColors = [
 // indices are not stable across boots, so chips are matched by their `name`
 // file rather than a hardcoded hwmonN path. nvidia-smi is optional — the
 // block is skipped entirely on machines without it, and the GPU tiles hide
-// themselves when the keys never arrive.
+// themselves when the keys never arrive. It is also skipped while the NVIDIA
+// card is runtime-suspended: nvidia-smi (like lspci) resumes a parked dGPU just
+// by running, so polling it every tick kept the card awake ~15s of every 20s
+// on hybrid laptops. The sysfs runtime_status read does not wake the device.
+// The battery is matched by glob: it is BAT1 on some ROG models (GU606).
 var sensorScript =
     'for h in /sys/class/hwmon/*; do n=$(cat "$h/name" 2>/dev/null); case "$n" in ' +
     'coretemp|k10temp|zenpower) echo "cpu_temp=$(cat "$h/temp1_input" 2>/dev/null)";; ' +
     'asus) echo "fan_cpu=$(cat "$h/fan1_input" 2>/dev/null)"; echo "fan_gpu=$(cat "$h/fan2_input" 2>/dev/null)";; ' +
     'esac; done; ' +
-    'b=/sys/class/power_supply/BAT0; if [ -d "$b" ]; then ' +
+    'for b in /sys/class/power_supply/BAT*; do [ -d "$b" ] || continue; ' +
     'echo "bat_pct=$(cat $b/capacity 2>/dev/null)"; ' +
     'echo "bat_status=$(cat $b/status 2>/dev/null)"; ' +
-    'echo "bat_power=$(cat $b/power_now 2>/dev/null)"; fi; ' +
-    'if command -v nvidia-smi >/dev/null 2>&1; then ' +
+    'echo "bat_power=$(cat $b/power_now 2>/dev/null)"; break; done; ' +
+    'if command -v nvidia-smi >/dev/null 2>&1 && grep -qs "^active$" /sys/bus/pci/drivers/nvidia/*/power/runtime_status; then ' +
     'nvidia-smi --query-gpu=temperature.gpu,power.draw,utilization.gpu --format=csv,noheader,nounits 2>/dev/null ' +
     '| head -1 | tr -d " " | { IFS=, read t p u; echo "gpu_temp=$t"; echo "gpu_power=$p"; echo "gpu_util=$u"; }; fi'
 

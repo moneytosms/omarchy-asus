@@ -279,6 +279,10 @@ Panel {
     property bool panelOverdrive: false
     property bool gpuMux: false
     property bool dgpuDisable: false
+    // asusd (6.4+) queues GPU writes until reboot instead of applying them,
+    // so `armoury list` keeps reporting the old value. -1 = nothing queued.
+    property int queuedMux: -1
+    property int queuedDgpu: -1
     property int pptPl1: 115
     property int pptPl1Min: 25
     property int pptPl1Max: 45
@@ -294,7 +298,13 @@ Panel {
 
     // GPU mode is derived from the mux/dgpu pair rather than stored, so it
     // can never drift out of sync with what the firmware actually reports.
-    readonly property string gpuMode: Model.gpuModeId(gpuMux, dgpuDisable)
+    // gpuMode is what the next boot will use (queued value wins);
+    // activeGpuMode is what is running now.
+    readonly property bool targetMux: queuedMux >= 0 ? queuedMux === 1 : gpuMux
+    readonly property bool targetDgpu: queuedDgpu >= 0 ? queuedDgpu === 1 : dgpuDisable
+    readonly property string gpuMode: Model.gpuModeId(targetMux, targetDgpu)
+    readonly property string activeGpuMode: Model.gpuModeId(gpuMux, dgpuDisable)
+    readonly property bool gpuRebootPending: gpuMode !== activeGpuMode
     readonly property bool hasGpuMode: armourySupported.gpuMux || armourySupported.dgpuDisable
 
     readonly property bool showBatteryLimit: setting("showBatteryLimit", true) === true
@@ -381,13 +391,13 @@ Panel {
     // switch on a mux-less laptop is still a single valid call.
     function setGpuMode(id) {
         var def = Model.gpuModeDef(id)
-        if (armourySupported.gpuMux && (def.mux === 1) !== gpuMux) {
-            gpuMux = def.mux === 1
+        if (armourySupported.gpuMux && (def.mux === 1) !== targetMux) {
+            queuedMux = def.mux
             setArmouryAttr("gpu_mux_mode", def.mux)
             return
         }
-        if (armourySupported.dgpuDisable && (def.dgpuDisable === 1) !== dgpuDisable) {
-            dgpuDisable = def.dgpuDisable === 1
+        if (armourySupported.dgpuDisable && (def.dgpuDisable === 1) !== targetDgpu) {
+            queuedDgpu = def.dgpuDisable
             setArmouryAttr("dgpu_disable", def.dgpuDisable)
         }
     }
@@ -577,6 +587,7 @@ Panel {
                             }
                         }
                         Text { width: parent.width; text: Model.gpuModeDef(root.gpuMode).desc; wrapMode: Text.WordWrap; color: Qt.darker(root.bar.foreground, 1.4); font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption }
+                        Text { visible: root.gpuRebootPending; width: parent.width; text: "\u{F0709}  Restart to switch to " + Model.gpuModeDef(root.gpuMode).name + " (running " + Model.gpuModeDef(root.activeGpuMode).name + ")"; wrapMode: Text.WordWrap; color: "#cc9944"; font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
                     }
 
                     // SCREEN — refresh rate comes from Hyprland, overdrive from
@@ -968,6 +979,12 @@ Panel {
         if (r.nv_dynamic_boost) { root.nvDynBoostMin = r.nv_dynamic_boost.min; root.nvDynBoostMax = r.nv_dynamic_boost.max }
         if (v.nv_temp_target !== undefined) root.nvTempTarget = v.nv_temp_target
         if (r.nv_temp_target) { root.nvTempTargetMin = r.nv_temp_target.min; root.nvTempTargetMax = r.nv_temp_target.max }
+        if ((a.supported.gpuMux || a.supported.dgpuDisable) && !gpuQueueProc.running) gpuQueueProc.running = true
+    } } }
+    Process { id: gpuQueueProc; command: Model.gpuQueueCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
+        var q = Model.parseGpuQueue(text)
+        root.queuedDgpu = q.dgpu_disable
+        root.queuedMux = q.gpu_mux_mode
     } } }
     Process { id: monitorProc; command: ["hyprctl", "-j", "monitors"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { var m = Model.parseMonitors(text); if (m) root.monitor = m } } }
     Process { id: checkHyprmoncfg; command: ["which", "hyprmoncfg"]; onExited: function(ec) { root.hyprmoncfgAvailable = ec === 0; if (root.hyprmoncfgAvailable && !hyprmoncfgProc.running) hyprmoncfgProc.running = true } }

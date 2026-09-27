@@ -132,6 +132,8 @@ assert.deepEqual(M.parseHyprmoncfgStatus("command not found"), { managed: false,
 assert.equal(M.gpuModeId(0, 0), "standard")
 assert.equal(M.gpuModeId(0, 1), "eco")
 assert.equal(M.gpuModeId(1, 0), "ultimate")
+assert.deepEqual(JSON.parse(JSON.stringify(M.parseGpuQueue("dgpu_disable i 1\ngpu_mux_mode i -1\n"))), { dgpu_disable: 1, gpu_mux_mode: -1 })
+assert.deepEqual(JSON.parse(JSON.stringify(M.parseGpuQueue("dgpu_disable \ngpu_mux_mode \n"))), { dgpu_disable: -1, gpu_mux_mode: -1 })
 
 // ---------------------------------------------------------------- features
 // asusctl 6.x names the charge limit ChargeControlEndThreshold; matching only

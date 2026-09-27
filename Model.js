@@ -496,12 +496,14 @@ function fmtWatts(w) { return w < 0 ? "—" : (Math.round(w * 10) / 10) + " W" }
 //   Eco      dGPU powered down, iGPU drives the panel
 //   Standard hybrid / Optimus, dGPU available on demand
 //   Ultimate MUX hands the panel straight to the dGPU (reboot required)
+// `mux` is the raw gpu_mux_mode value: the kernel uses 0 = discrete (dGPU
+// drives the panel), 1 = hybrid/Optimus.
 var gpuModes = [
-    { id: "eco",      name: "Eco",      icon: "\u{F06C0}", desc: "iGPU only, dGPU off",  mux: 0, dgpuDisable: 1, reboot: false,
+    { id: "eco",      name: "Eco",      icon: "\u{F06C0}", desc: "iGPU only, dGPU off",  mux: 1, dgpuDisable: 1, reboot: false,
       tip: "Powers the discrete GPU down completely.\nBest battery life; games and CUDA will not see a dGPU." },
-    { id: "standard", name: "Standard", icon: "\u{F035B}", desc: "Hybrid (Optimus)",     mux: 0, dgpuDisable: 0, reboot: false,
+    { id: "standard", name: "Standard", icon: "\u{F035B}", desc: "Hybrid (Optimus)",     mux: 1, dgpuDisable: 0, reboot: false,
       tip: "Hybrid graphics. The iGPU drives the screen and the\ndiscrete GPU wakes on demand. The normal setting." },
-    { id: "ultimate", name: "Ultimate", icon: "\u{F04C5}", desc: "dGPU direct — needs reboot", mux: 1, dgpuDisable: 0, reboot: true,
+    { id: "ultimate", name: "Ultimate", icon: "\u{F04C5}", desc: "dGPU direct — needs reboot", mux: 0, dgpuDisable: 0, reboot: true,
       tip: "MUX switch: the discrete GPU drives the internal panel\ndirectly. Fastest for games, costs battery life.\nTakes effect after a reboot." }
 ]
 

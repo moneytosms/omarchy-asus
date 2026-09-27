@@ -277,7 +277,7 @@ Panel {
     property var armourySupported: ({ panelOverdrive: false, gpuMux: false, dgpuDisable: false, pptPl1: false, pptPl2: false, nvDynBoost: false, nvTempTarget: false })
     property var armouryDefaults: ({})
     property bool panelOverdrive: false
-    property bool gpuMux: false
+    property bool gpuMux: false // true = MUX on dGPU (Ultimate)
     property bool dgpuDisable: false
     // asusd (6.4+) queues GPU writes until reboot instead of applying them,
     // so `armoury list` keeps reporting the old value. -1 = nothing queued.
@@ -300,7 +300,7 @@ Panel {
     // can never drift out of sync with what the firmware actually reports.
     // gpuMode is what the next boot will use (queued value wins);
     // activeGpuMode is what is running now.
-    readonly property bool targetMux: queuedMux >= 0 ? queuedMux === 1 : gpuMux
+    readonly property bool targetMux: queuedMux >= 0 ? queuedMux === 0 : gpuMux
     readonly property bool targetDgpu: queuedDgpu >= 0 ? queuedDgpu === 1 : dgpuDisable
     readonly property string gpuMode: Model.gpuModeId(targetMux, targetDgpu)
     readonly property string activeGpuMode: Model.gpuModeId(gpuMux, dgpuDisable)
@@ -391,7 +391,7 @@ Panel {
     // switch on a mux-less laptop is still a single valid call.
     function setGpuMode(id) {
         var def = Model.gpuModeDef(id)
-        if (armourySupported.gpuMux && (def.mux === 1) !== targetMux) {
+        if (armourySupported.gpuMux && (def.mux === 0) !== targetMux) {
             queuedMux = def.mux
             setArmouryAttr("gpu_mux_mode", def.mux)
             return
@@ -969,7 +969,7 @@ Panel {
         root.armouryDefaults = a.defaults
         var v = a.values, r = a.ranges
         if (v.panel_overdrive !== undefined) root.panelOverdrive = v.panel_overdrive === 1
-        if (v.gpu_mux_mode !== undefined) root.gpuMux = v.gpu_mux_mode === 1
+        if (v.gpu_mux_mode !== undefined) root.gpuMux = v.gpu_mux_mode === 0
         if (v.dgpu_disable !== undefined) root.dgpuDisable = v.dgpu_disable === 1
         if (v.ppt_pl1_spl !== undefined) root.pptPl1 = v.ppt_pl1_spl
         if (r.ppt_pl1_spl) { root.pptPl1Min = r.ppt_pl1_spl.min; root.pptPl1Max = r.ppt_pl1_spl.max }

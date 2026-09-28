@@ -283,6 +283,11 @@ Panel {
     // so `armoury list` keeps reporting the old value. -1 = nothing queued.
     property int queuedMux: -1
     property int queuedDgpu: -1
+    // Eco picked while running Ultimate. The kernel refuses dgpu_disable while
+    // the MUX is on the dGPU, so only the MUX is queued now; the marker file
+    // survives the reboot and the dGPU-off write is queued on the next boot.
+    property bool ecoPending: false
+    readonly property string ecoMarker: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state") + "/omarchy-asus-eco-pending"
     property int pptPl1: 115
     property int pptPl1Min: 25
     property int pptPl1Max: 45
@@ -302,7 +307,7 @@ Panel {
     // activeGpuMode is what is running now.
     readonly property bool targetMux: queuedMux >= 0 ? queuedMux === 0 : gpuMux
     readonly property bool targetDgpu: queuedDgpu >= 0 ? queuedDgpu === 1 : dgpuDisable
-    readonly property string gpuMode: Model.gpuModeId(targetMux, targetDgpu)
+    readonly property string gpuMode: ecoPending ? "eco" : Model.gpuModeId(targetMux, targetDgpu)
     readonly property string activeGpuMode: Model.gpuModeId(gpuMux, dgpuDisable)
     readonly property bool gpuRebootPending: gpuMode !== activeGpuMode
     readonly property bool hasGpuMode: armourySupported.gpuMux || armourySupported.dgpuDisable
@@ -391,15 +396,24 @@ Panel {
     // switch on a mux-less laptop is still a single valid call.
     function setGpuMode(id) {
         var def = Model.gpuModeDef(id)
+        setEcoPending(gpuMux && id === "eco")
         if (armourySupported.gpuMux && (def.mux === 0) !== targetMux) {
             queuedMux = def.mux
             setArmouryAttr("gpu_mux_mode", def.mux)
             return
         }
+        if (ecoPending) return
         if (armourySupported.dgpuDisable && (def.dgpuDisable === 1) !== targetDgpu) {
             queuedDgpu = def.dgpuDisable
             setArmouryAttr("dgpu_disable", def.dgpuDisable)
         }
+    }
+
+    function setEcoPending(on) {
+        if (on === ecoPending) return
+        ecoPending = on
+        ecoMarkerProc.command = ["sh", "-c", on ? 'mkdir -p "$(dirname "$1")" && touch "$1"' : 'rm -f "$1"', "sh", ecoMarker]
+        ecoMarkerProc.running = true
     }
 
     // Applying a refresh rate is two steps where hyprmoncfg is managing
@@ -587,7 +601,7 @@ Panel {
                             }
                         }
                         Text { width: parent.width; text: Model.gpuModeDef(root.gpuMode).desc; wrapMode: Text.WordWrap; color: Qt.darker(root.bar.foreground, 1.4); font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption }
-                        Text { visible: root.gpuRebootPending; width: parent.width; text: "\u{F0709}  Restart to switch to " + Model.gpuModeDef(root.gpuMode).name + " (running " + Model.gpuModeDef(root.activeGpuMode).name + ")"; wrapMode: Text.WordWrap; color: "#cc9944"; font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+                        Text { visible: root.gpuRebootPending; width: parent.width; text: "\u{F0709}  Restart" + (root.ecoPending && root.gpuMux ? " twice" : "") + " to switch to " + Model.gpuModeDef(root.gpuMode).name + " (running " + Model.gpuModeDef(root.activeGpuMode).name + ")"; wrapMode: Text.WordWrap; color: "#cc9944"; font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
                     }
 
                     // SCREEN — refresh rate comes from Hyprland, overdrive from
@@ -923,8 +937,11 @@ Panel {
 
     IpcHandler { target: "io.github.moneytosms.asus"; function open() { root.open() } function close() { root.close() } function show() { root.open() } function hide() { root.close() } function toggle() { root.toggle() } function refresh() { root.refresh() } }
     onOpenedChanged: { if (opened) { Qt.callLater(refresh); cursorActive = false } }
-    Component.onCompleted: { checkAsusctl.running = true; checkHyprmoncfg.running = true }
+    Component.onCompleted: { checkEcoMarker.running = true; checkHyprmoncfg.running = true }
 
+    // Marker must be read before the first armoury refresh, so it gates checkAsusctl.
+    Process { id: checkEcoMarker; command: ["test", "-f", root.ecoMarker]; onExited: function(ec) { root.ecoPending = ec === 0; checkAsusctl.running = true } }
+    Process { id: ecoMarkerProc }
     Process { id: checkAsusctl; command: ["which", "asusctl"]; onExited: function(ec) { root.asusctlAvailable = ec === 0; if (root.asusctlAvailable) refresh() } }
     Process { id: profileProc; command: ["asusctl", "profile", "get"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { var p = Model.parseCurrentProfile(text); if (p) { root.currentProfile = p; var i = root.profiles.indexOf(p); if (i >= 0) root.profileIndex = i }; root.acProfile = Model.parseProfiles(text); root.profileLoaded = true } } }
     Process { id: infoProc; command: ["asusctl", "info", "--show-supported"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.supported = Model.parseSupportedFeatures(text); root.infoLoaded = true } } }
@@ -985,6 +1002,8 @@ Panel {
         var q = Model.parseGpuQueue(text)
         root.queuedDgpu = q.dgpu_disable
         root.queuedMux = q.gpu_mux_mode
+        // Rebooted out of Ultimate: finish the pending Eco switch.
+        if (root.ecoPending && !root.gpuMux) { root.setEcoPending(false); root.setGpuMode("eco") }
     } } }
     Process { id: monitorProc; command: ["hyprctl", "-j", "monitors"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { var m = Model.parseMonitors(text); if (m) root.monitor = m } } }
     Process { id: checkHyprmoncfg; command: ["which", "hyprmoncfg"]; onExited: function(ec) { root.hyprmoncfgAvailable = ec === 0; if (root.hyprmoncfgAvailable && !hyprmoncfgProc.running) hyprmoncfgProc.running = true } }

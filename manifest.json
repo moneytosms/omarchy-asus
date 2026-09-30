@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "id": "io.github.moneytosms.asus",
   "name": "ASUS",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "author": "moneytosms",
   "license": "MIT",
   "homepage": "https://github.com/moneytosms/omarchy-asus",
-  "description": "G-Helper-style ASUS laptop control — live temps and fan speeds, performance and GPU modes, screen refresh, keyboard RGB, editable fan curves, and firmware power limits — from the Omarchy bar",
+  "description": "G-Helper-style ASUS laptop control with live Cardwire GPU switching and restart-gated Ultimate mode — from the Omarchy bar",
   "kinds": [
     "bar-widget"
   ],
@@ -15,7 +15,7 @@
   },
   "barWidget": {
     "displayName": "ASUS",
-    "description": "Live temps and fan speeds, performance and GPU modes, screen refresh, keyboard RGB, fan curves, and battery charge limit for ASUS ROG/TUF laptops",
+    "description": "Live temps and fan speeds, Cardwire GPU modes, screen refresh, keyboard RGB, fan curves, and battery charge limit for ASUS ROG/TUF laptops",
     "category": "System",
     "aliases": ["asus", "rog", "tuf", "aura", "fan", "rgb", "lighting", "gpu", "temp", "ghelper"],
     "allowMultiple": false,

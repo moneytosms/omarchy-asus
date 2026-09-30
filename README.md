@@ -30,8 +30,10 @@ that.
   the panel is open. The same readings appear in the bar icon's tooltip, so
   "how hot is it right now" needs no click.
 - **Main** — performance mode (Quiet/Balanced/Performance, tinted by mode),
-  GPU mode (Eco/Standard/Ultimate), screen refresh rate and panel overdrive,
-  battery charge limit.
+  saved separately for AC and battery, plus GPU mode (Eco/Standard/Ultimate),
+  screen refresh rate, panel overdrive, and battery charge limit. Eco and
+  Standard use Cardwire for live switching; Ultimate asks for confirmation
+  before queuing the firmware MUX change and restarting.
 - **RGB** — keyboard lighting, filtered to the aura effects your laptop
   actually reports (`asusctl info --show-supported`), not a fixed list of
   twelve, plus brightness and the awake/boot/sleep power states.
@@ -58,7 +60,7 @@ feature set where Linux tooling allows it. What is deliberately absent:
 | CPU boost toggle | Needs root writes to `intel_pstate`/`cpufreq`; `asusctl` exposes no equivalent |
 | AutoTDP, FPS limiter, overlay | Windows-only mechanisms |
 | Per-key / per-zone RGB | `asusctl` exposes zones only on some models; single-colour effects only for now |
-| Automatic AC/battery profile switching | `asusctl` applies its own AC/battery profiles; not duplicated here |
+| Automatic AC/battery profile switching | `asusd` stores separate performance profiles and reapplies them when power changes |
 
 ### Screen refresh rate
 
@@ -102,7 +104,17 @@ yay -S asusctl
 sudo pacman -S asusctl
 
 sudo systemctl enable --now asusd.service
+
+# For live Eco/Standard switching (Arch package)
+yay -S cardwire
+sudo systemctl enable --now cardwired.service
 ```
+
+GPU mode behavior follows the G-Helper names: Eco blocks the dGPU while the
+iGPU drives the panel, Standard leaves the dGPU available on demand, and
+Ultimate makes the dGPU the direct display GPU. Cardwire is used only for the
+live Eco/Standard policy; Ultimate remains an ASUS firmware MUX transition and
+requires a restart.
 
 ## Install
 

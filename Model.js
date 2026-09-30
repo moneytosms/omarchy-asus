@@ -123,6 +123,10 @@ function parseProfiles(raw) {
     return r
 }
 
+function profileCommand(profile, onBattery) {
+    return ["asusctl", "profile", "set", onBattery ? "--battery" : "--ac", profile]
+}
+
 // ============================================================
 // Feature detection
 // ============================================================
@@ -491,17 +495,22 @@ function fmtWatts(w) { return w < 0 ? "—" : (Math.round(w * 10) / 10) + " W" }
 // ============================================================
 // GPU mode (G-Helper's Eco / Standard / Ultimate)
 // ============================================================
-// asusctl has no single "gpu mode" knob, so the three modes are expressed as
-// the pair of armoury attributes G-Helper drives on Windows:
-//   Eco      dGPU powered down, iGPU drives the panel
-//   Standard hybrid / Optimus, dGPU available on demand
-//   Ultimate MUX hands the panel straight to the dGPU (reboot required)
+// ASUS has a firmware MUX pair, while Cardwire supplies the live Optimus
+// policy. Keeping the firmware in the hybrid/iGPU path lets Eco and Standard
+// switch without a reboot; Cardwire blocks or unblocks the offload dGPU live.
+// Ultimate is different: it moves the panel to the dGPU through the firmware
+// MUX and must be applied during a restart.
+//
+// On ASUS laptops, gpu_mux_mode=0 is the dGPU-direct (Ultimate) setting and
+// gpu_mux_mode=1 is the hybrid/iGPU path. The Eco `dgpuDisable` value below is
+// deliberately 0: Cardwire provides the live dGPU block, so the device can be
+// restored to Standard without another firmware reboot.
 var gpuModes = [
-    { id: "eco",      name: "Eco",      icon: "\u{F06C0}", desc: "iGPU only, dGPU off",  mux: 0, dgpuDisable: 1, reboot: false,
-      tip: "Powers the discrete GPU down completely.\nBest battery life; games and CUDA will not see a dGPU." },
-    { id: "standard", name: "Standard", icon: "\u{F035B}", desc: "Hybrid (Optimus)",     mux: 0, dgpuDisable: 0, reboot: false,
-      tip: "Hybrid graphics. The iGPU drives the screen and the\ndiscrete GPU wakes on demand. The normal setting." },
-    { id: "ultimate", name: "Ultimate", icon: "\u{F04C5}", desc: "dGPU direct — needs reboot", mux: 1, dgpuDisable: 0, reboot: true,
+    { id: "eco",      name: "Eco",      icon: "\u{F06C0}", desc: "iGPU only, dGPU blocked", mux: 1, dgpuDisable: 0, live: "integrated", reboot: false,
+      tip: "iGPU only. Cardwire blocks the discrete GPU live and it can power down when idle.\nBest battery life; apps already using the dGPU need to be restarted." },
+    { id: "standard", name: "Standard", icon: "\u{F035B}", desc: "Hybrid (Optimus)",        mux: 1, dgpuDisable: 0, live: "hybrid", reboot: false,
+      tip: "Hybrid graphics. The iGPU drives the screen and the\ndiscrete GPU wakes on demand. Switches live without a reboot." },
+    { id: "ultimate", name: "Ultimate", icon: "\u{F04C5}", desc: "dGPU direct — needs reboot", mux: 0, dgpuDisable: 0, reboot: true,
       tip: "MUX switch: the discrete GPU drives the internal panel\ndirectly. Fastest for games, costs battery life.\nTakes effect after a reboot." }
 ]
 
@@ -516,13 +525,39 @@ var armouryTips = {
 }
 
 function gpuModeId(mux, dgpuDisabled) {
-    if (mux) return "ultimate"
+    if (!mux) return "ultimate"
     return dgpuDisabled ? "eco" : "standard"
 }
 
 function gpuModeDef(id) {
     for (var i = 0; i < gpuModes.length; i++) if (gpuModes[i].id === id) return gpuModes[i]
     return gpuModes[1]
+}
+
+// Cardwire prints e.g. "Current Mode: Hybrid". Keep the parser permissive
+// because older releases printed only the mode name on some error paths.
+function parseCardwireMode(raw) {
+    var text = String(raw || "").trim()
+    var m = text.match(/Current Mode:\s*(Integrated|Hybrid|Manual|Smart)/i)
+    if (m) return m[1].toLowerCase()
+    var bare = text.match(/^(integrated|hybrid|manual|smart)$/i)
+    return bare ? bare[1].toLowerCase() : ""
+}
+
+function cardwireModeForGpuMode(id) {
+    var def = gpuModeDef(id)
+    return def.live || ""
+}
+
+function gpuModeFromCardwire(mode) {
+    var n = String(mode || "").toLowerCase()
+    if (n === "integrated") return "eco"
+    if (n === "hybrid") return "standard"
+    return ""
+}
+
+function gpuModeNeedsRestart(currentId, targetId) {
+    return String(currentId || "") === "ultimate" || String(targetId || "") === "ultimate"
 }
 
 // ============================================================

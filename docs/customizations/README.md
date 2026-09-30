@@ -1,6 +1,6 @@
 # Local ASUS customizations
 
-This branch preserves the installed customization from September 30, 2026. The original five-file change is commit `fdc505c`, based on upstream `59b44a3`. It is a development snapshot, not a replacement for current upstream GPU queue handling.
+This branch preserves the installed customization from September 30, 2026. The original five-file change is commit `fdc505c`, based on upstream `59b44a3`. The branch now also merges upstream `fe35c24`, preserving queued GPU values and the pending-restart indicator alongside Cardwire live switching. It remains a development branch until restart restoration is validated.
 
 ![Customized ASUS Main panel captured on the laptop](main.png)
 
@@ -18,7 +18,8 @@ Before submitting this GPU feature upstream:
 
 - Include a plugin-owned consumer for the `~/.local/state/omarchy-asus/pending-gpu-mode` marker. The current code writes it when leaving Ultimate, but the plugin ships no post-boot reader, and the audit found no installed reader.
 - Preserve a usable firmware path when Cardwire is unavailable. The current customization disables Eco/Standard controls in that case.
-- Reconcile with current upstream queued GPU values and Eco restoration. Upstream has already fixed MUX polarity, so a separate polarity PR would duplicate that fix.
 - Verify the confirmed restart and post-boot GPU restoration on hardware. Those transitions were not exercised in this session.
 
 The full custom model test suite passes, and the installed panel was opened and inspected for the screenshot. These checks do not establish the pending restart behavior as ready to ship.
+
+The upstream merge uses raw numeric MUX values consistently. Regression checks cover live Eco, unchanged queues, pending Ultimate, leaving Ultimate, and firmware-disabled GPUs. The separate profile PR remains unchanged.

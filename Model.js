@@ -529,6 +529,23 @@ function gpuModeId(mux, dgpuDisabled) {
     return dgpuDisabled ? "eco" : "standard"
 }
 
+// asusd 6.4+ holds GPU writes in QueuedGpuValue until reboot. One busctl
+// call per attribute, printed as "<name> i <value>"; -1 means nothing queued.
+function gpuQueueCommand() {
+    var get = "busctl get-property xyz.ljones.Asusd /xyz/ljones/asus_armoury/$a xyz.ljones.AsusArmoury QueuedGpuValue"
+    return ["sh", "-c", "for a in dgpu_disable gpu_mux_mode; do printf '%s ' $a; " + get + " 2>/dev/null || echo; done"]
+}
+
+function parseGpuQueue(raw) {
+    var out = { dgpu_disable: -1, gpu_mux_mode: -1 }
+    var lines = String(raw || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+        var m = lines[i].trim().match(/^(\w+) i (-?\d+)$/)
+        if (m && out[m[1]] !== undefined) out[m[1]] = parseInt(m[2])
+    }
+    return out
+}
+
 function gpuModeDef(id) {
     for (var i = 0; i < gpuModes.length; i++) if (gpuModes[i].id === id) return gpuModes[i]
     return gpuModes[1]
@@ -554,6 +571,17 @@ function gpuModeFromCardwire(mode) {
     if (n === "integrated") return "eco"
     if (n === "hybrid") return "standard"
     return ""
+}
+
+// A queued value equal to the live firmware is not a pending transition.
+// Cardwire still owns Eco/Standard while the firmware stays in hybrid mode.
+function gpuModeState(mux, dgpuDisabled, queuedMux, queuedDgpu, cardwireMode) {
+    var active = mux === 0 ? "ultimate" : (dgpuDisabled ? "eco" : (gpuModeFromCardwire(cardwireMode) || "standard"))
+    var changed = (queuedMux >= 0 && queuedMux !== mux)
+        || (queuedDgpu >= 0 && (queuedDgpu === 1) !== !!dgpuDisabled)
+    var target = changed ? gpuModeId(queuedMux >= 0 ? queuedMux : mux,
+        queuedDgpu >= 0 ? queuedDgpu === 1 : dgpuDisabled) : active
+    return { active: active, target: target, rebootPending: changed }
 }
 
 function gpuModeNeedsRestart(currentId, targetId) {

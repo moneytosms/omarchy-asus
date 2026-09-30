@@ -159,6 +159,19 @@ assert.equal(M.gpuModeNeedsRestart("standard", "ultimate"), true)
 assert.equal(M.gpuModeNeedsRestart("ultimate", "eco"), true)
 assert.equal(M.gpuModeNeedsRestart("eco", "standard"), false)
 
+assert.deepEqual(JSON.parse(JSON.stringify(M.parseGpuQueue("dgpu_disable i 1\ngpu_mux_mode i -1\n"))), { dgpu_disable: 1, gpu_mux_mode: -1 })
+assert.deepEqual(JSON.parse(JSON.stringify(M.parseGpuQueue("dgpu_disable \ngpu_mux_mode \n"))), { dgpu_disable: -1, gpu_mux_mode: -1 })
+
+// Live Cardwire state must not invert raw firmware MUX values, and an
+// unchanged firmware queue must not mask a live Eco selection.
+assert.deepEqual(M.gpuModeState(1, false, -1, -1, "integrated"), { active: "eco", target: "eco", rebootPending: false })
+assert.deepEqual(M.gpuModeState(1, false, 1, 0, "integrated"), { active: "eco", target: "eco", rebootPending: false })
+assert.deepEqual(M.gpuModeState(1, false, 0, 0, "hybrid"), { active: "standard", target: "ultimate", rebootPending: true })
+assert.deepEqual(M.gpuModeState(0, false, 1, 0, "integrated"), { active: "ultimate", target: "standard", rebootPending: true })
+assert.deepEqual(M.gpuModeState(1, false, -1, 1, ""), { active: "standard", target: "eco", rebootPending: true })
+
+assert.deepEqual(M.gpuModeState(1, true, -1, -1, "hybrid"), { active: "eco", target: "eco", rebootPending: false })
+
 // ---------------------------------------------------------------- features
 // asusctl 6.x names the charge limit ChargeControlEndThreshold; matching only
 // on the word "battery" hid the limit slider on models that support it.

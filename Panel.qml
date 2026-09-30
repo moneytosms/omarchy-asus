@@ -279,7 +279,7 @@ Panel {
     property var armourySupported: ({ panelOverdrive: false, gpuMux: false, dgpuDisable: false, pptPl1: false, pptPl2: false, nvDynBoost: false, nvTempTarget: false })
     property var armouryDefaults: ({})
     property bool panelOverdrive: false
-    property bool gpuMux: false
+    property int gpuMux: 1 // raw firmware value: 0 = dGPU, 1 = hybrid
     property bool dgpuDisable: false
     property bool armouryLoaded: false
     property int gpuModeStep: 0
@@ -293,6 +293,15 @@ Panel {
     property bool cardwireAvailable: false
     property string cardwireMode: ""
     property string gpuModeError: ""
+    // asusd (6.4+) queues GPU writes until reboot instead of applying them,
+    // so `armoury list` keeps reporting the old value. -1 = nothing queued.
+    property int queuedMux: -1
+    property int queuedDgpu: -1
+    // Eco picked while running Ultimate. The kernel refuses dgpu_disable while
+    // the MUX is on the dGPU, so only the MUX is queued now; the marker file
+    // survives the reboot and the dGPU-off write is queued on the next boot.
+    property bool ecoPending: false
+    readonly property string ecoMarker: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state") + "/omarchy-asus-eco-pending"
     property int pptPl1: 115
     property int pptPl1Min: 25
     property int pptPl1Max: 45
@@ -306,15 +315,12 @@ Panel {
     property int nvTempTargetMin: 75
     property int nvTempTargetMax: 87
 
-    // Ultimate is a firmware MUX state. Eco and Standard are the live
-    // Cardwire policy layered on top of the firmware's hybrid path. Prefer
-    // the live daemon state whenever the firmware is not in Ultimate, so the
-    // button always reflects what is actually blocking the dGPU right now.
-    readonly property string firmwareGpuMode: Model.gpuModeId(gpuMux, dgpuDisable)
-    readonly property string cardwireGpuMode: Model.gpuModeFromCardwire(cardwireMode)
-    readonly property string gpuMode: firmwareGpuMode === "ultimate"
-        ? "ultimate"
-        : (cardwireGpuMode || firmwareGpuMode)
+    // Keep raw firmware values separate from the active Cardwire policy and
+    // values queued by asusd for the next boot.
+    readonly property var gpuState: Model.gpuModeState(gpuMux, dgpuDisable, queuedMux, queuedDgpu, cardwireMode)
+    readonly property string activeGpuMode: gpuState.active
+    readonly property string gpuMode: ecoPending ? "eco" : gpuState.target
+    readonly property bool gpuRebootPending: gpuState.rebootPending || ecoPending
     readonly property bool hasGpuMode: armouryLoaded && (armourySupported.gpuMux || armourySupported.dgpuDisable || cardwireAvailable)
 
     readonly property bool showBatteryLimit: setting("showBatteryLimit", true) === true
@@ -427,7 +433,7 @@ Panel {
         if (!def || id === gpuMode) return
         gpuModeError = ""
 
-        if (Model.gpuModeNeedsRestart(gpuMode, id)) {
+        if (gpuRebootPending || Model.gpuModeNeedsRestart(activeGpuMode, id)) {
             requestGpuRestart(id)
             return
         }
@@ -499,6 +505,13 @@ Panel {
         root.close()
         restartProc.command = ["omarchy", "system", "reboot"]
         restartProc.running = true
+    }
+
+    function setEcoPending(on) {
+        if (on === ecoPending) return
+        ecoPending = on
+        ecoMarkerProc.command = ["sh", "-c", on ? 'mkdir -p "$(dirname "$1")" && touch "$1"' : 'rm -f "$1"', "sh", ecoMarker]
+        ecoMarkerProc.running = true
     }
 
     // Applying a refresh rate is two steps where hyprmoncfg is managing
@@ -693,6 +706,7 @@ Panel {
                         }
                         Text { width: parent.width; text: Model.gpuModeDef(root.gpuMode).desc; wrapMode: Text.WordWrap; color: Qt.darker(root.bar.foreground, 1.4); font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption }
                         Text { visible: root.gpuModeError !== ""; width: parent.width; text: root.gpuModeError; wrapMode: Text.WordWrap; color: Color.urgent; font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption }
+                        Text { visible: root.gpuRebootPending; width: parent.width; text: "\u{F0709}  Restart" + (root.ecoPending && root.gpuMux === 0 ? " twice" : "") + " to switch to " + Model.gpuModeDef(root.gpuMode).name + " (running " + Model.gpuModeDef(root.activeGpuMode).name + ")"; wrapMode: Text.WordWrap; color: "#cc9944"; font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
                     }
 
                     // SCREEN — refresh rate comes from Hyprland, overdrive from
@@ -1059,8 +1073,11 @@ Panel {
 
     IpcHandler { target: "io.github.moneytosms.asus"; function open() { root.open() } function close() { root.close() } function show() { root.open() } function hide() { root.close() } function toggle() { root.toggle() } function refresh() { root.refresh() } }
     onOpenedChanged: { if (opened) { Qt.callLater(refresh); cursorActive = false } }
-    Component.onCompleted: { checkAsusctl.running = true; checkCardwire.running = true; checkHyprmoncfg.running = true }
+    Component.onCompleted: { checkEcoMarker.running = true; checkCardwire.running = true; checkHyprmoncfg.running = true }
 
+    // Marker must be read before the first armoury refresh, so it gates checkAsusctl.
+    Process { id: checkEcoMarker; command: ["test", "-f", root.ecoMarker]; onExited: function(ec) { root.ecoPending = ec === 0; checkAsusctl.running = true } }
+    Process { id: ecoMarkerProc }
     Process { id: checkAsusctl; command: ["which", "asusctl"]; onExited: function(ec) { root.asusctlAvailable = ec === 0; if (root.asusctlAvailable) refresh() } }
     Process {
         id: checkCardwire
@@ -1113,7 +1130,7 @@ Panel {
         root.armouryDefaults = a.defaults
         var v = a.values, r = a.ranges
         if (v.panel_overdrive !== undefined) root.panelOverdrive = v.panel_overdrive === 1
-        if (v.gpu_mux_mode !== undefined) root.gpuMux = v.gpu_mux_mode === 1
+        if (v.gpu_mux_mode !== undefined) root.gpuMux = v.gpu_mux_mode
         if (v.dgpu_disable !== undefined) root.dgpuDisable = v.dgpu_disable === 1
         if (v.ppt_pl1_spl !== undefined) root.pptPl1 = v.ppt_pl1_spl
         if (r.ppt_pl1_spl) { root.pptPl1Min = r.ppt_pl1_spl.min; root.pptPl1Max = r.ppt_pl1_spl.max }
@@ -1124,6 +1141,14 @@ Panel {
         if (v.nv_temp_target !== undefined) root.nvTempTarget = v.nv_temp_target
         if (r.nv_temp_target) { root.nvTempTargetMin = r.nv_temp_target.min; root.nvTempTargetMax = r.nv_temp_target.max }
         root.armouryLoaded = true
+        if ((a.supported.gpuMux || a.supported.dgpuDisable) && !gpuQueueProc.running) gpuQueueProc.running = true
+    } } }
+    Process { id: gpuQueueProc; command: Model.gpuQueueCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
+        var q = Model.parseGpuQueue(text)
+        root.queuedDgpu = q.dgpu_disable
+        root.queuedMux = q.gpu_mux_mode
+        // Rebooted out of Ultimate: finish the pending Eco switch.
+        if (root.ecoPending && root.gpuMux !== 0) { root.setEcoPending(false); root.setArmouryAttr("dgpu_disable", 1) }
     } } }
     Process { id: monitorProc; command: ["hyprctl", "-j", "monitors"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { var m = Model.parseMonitors(text); if (m) root.monitor = m } } }
     Process { id: checkHyprmoncfg; command: ["which", "hyprmoncfg"]; onExited: function(ec) { root.hyprmoncfgAvailable = ec === 0; if (root.hyprmoncfgAvailable && !hyprmoncfgProc.running) hyprmoncfgProc.running = true } }

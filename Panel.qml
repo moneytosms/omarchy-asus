@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Services.UPower
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -198,6 +199,7 @@ Panel {
     property int batteryLimit: 100
     property bool asusctlAvailable: false
     property bool cursorActive: false
+    readonly property bool onBattery: UPower.onBattery
 
     // Live sensors — refreshed on a faster tick than the asusctl state, since
     // temps and fan speeds are the numbers you actually watch move.
@@ -277,8 +279,20 @@ Panel {
     property var armourySupported: ({ panelOverdrive: false, gpuMux: false, dgpuDisable: false, pptPl1: false, pptPl2: false, nvDynBoost: false, nvTempTarget: false })
     property var armouryDefaults: ({})
     property bool panelOverdrive: false
-    property bool gpuMux: false // true = MUX on dGPU (Ultimate)
+    property int gpuMux: 1 // raw firmware value: 0 = dGPU, 1 = hybrid
     property bool dgpuDisable: false
+    property bool armouryLoaded: false
+    property int gpuModeStep: 0
+    property int gpuModeTargetMux: -1
+    property int gpuModeTargetDgpu: -1
+    property string gpuModeOperation: ""
+    property string gpuModeTargetId: ""
+    property bool gpuRestartConfirmOpen: false
+    property bool gpuModeRestarting: false
+    property string pendingGpuMode: ""
+    property bool cardwireAvailable: false
+    property string cardwireMode: ""
+    property string gpuModeError: ""
     // asusd (6.4+) queues GPU writes until reboot instead of applying them,
     // so `armoury list` keeps reporting the old value. -1 = nothing queued.
     property int queuedMux: -1
@@ -301,16 +315,13 @@ Panel {
     property int nvTempTargetMin: 75
     property int nvTempTargetMax: 87
 
-    // GPU mode is derived from the mux/dgpu pair rather than stored, so it
-    // can never drift out of sync with what the firmware actually reports.
-    // gpuMode is what the next boot will use (queued value wins);
-    // activeGpuMode is what is running now.
-    readonly property bool targetMux: queuedMux >= 0 ? queuedMux === 0 : gpuMux
-    readonly property bool targetDgpu: queuedDgpu >= 0 ? queuedDgpu === 1 : dgpuDisable
-    readonly property string gpuMode: ecoPending ? "eco" : Model.gpuModeId(targetMux, targetDgpu)
-    readonly property string activeGpuMode: Model.gpuModeId(gpuMux, dgpuDisable)
-    readonly property bool gpuRebootPending: gpuMode !== activeGpuMode
-    readonly property bool hasGpuMode: armourySupported.gpuMux || armourySupported.dgpuDisable
+    // Keep raw firmware values separate from the active Cardwire policy and
+    // values queued by asusd for the next boot.
+    readonly property var gpuState: Model.gpuModeState(gpuMux, dgpuDisable, queuedMux, queuedDgpu, cardwireMode)
+    readonly property string activeGpuMode: gpuState.active
+    readonly property string gpuMode: ecoPending ? "eco" : gpuState.target
+    readonly property bool gpuRebootPending: gpuState.rebootPending || ecoPending
+    readonly property bool hasGpuMode: armouryLoaded && (armourySupported.gpuMux || armourySupported.dgpuDisable || cardwireAvailable)
 
     readonly property bool showBatteryLimit: setting("showBatteryLimit", true) === true
     readonly property int refreshInterval: Math.max(5, Math.min(60, Number(setting("refreshIntervalSec", 10)) || 10)) * 1000
@@ -322,12 +333,13 @@ Panel {
         if (supported.hasBattery && !batteryProc.running) batteryProc.running = true
         if (!ledProc.running) ledProc.running = true
         if (!armouryProc.running) armouryProc.running = true
+        if (cardwireAvailable && !cardwireGetProc.running) cardwireGetProc.running = true
         if (!monitorProc.running) monitorProc.running = true
         if (hyprmoncfgAvailable && !hyprmoncfgProc.running) hyprmoncfgProc.running = true
         if (supported.hasFanCurve) { if (!fanDetailProc.running) fanDetailProc.running = true }
     }
 
-    function setProfile(p) { if (!p || actionProc.running) return; actionProc.command = ["asusctl", "profile", "set", p]; actionProc.running = true }
+    function setProfile(p) { if (!p || actionProc.running) return; actionProc.command = Model.profileCommand(p, root.onBattery); actionProc.running = true }
     function cycleProfile(d) { profileIndex = Model.selectProfileIndex(profileIndex, d, profiles); setProfile(profiles[profileIndex]) }
 
     function applyEffect() {
@@ -391,22 +403,108 @@ Panel {
         if (d.nv_temp_target !== undefined) setNvTempTarget(d.nv_temp_target)
     }
 
-    // GPU mode — Eco/Standard/Ultimate collapse to the mux + dgpu_disable
-    // pair. Only the attribute that actually changes is written, so an Eco
-    // switch on a mux-less laptop is still a single valid call.
+    // GPU mode — Cardwire handles Eco/Standard live. Any transition to or
+    // from Ultimate is held behind a confirmation dialog; no asusctl write is
+    // queued until the user accepts the restart.
+    function requestGpuRestart(id) {
+        pendingGpuMode = id
+        gpuRestartConfirmOpen = true
+        gpuRestartConfirm.selectedIndex = 1
+        Qt.callLater(function() { gpuConfirmLayer.forceActiveFocus() })
+    }
+
+    function cancelGpuRestart() {
+        pendingGpuMode = ""
+        gpuRestartConfirmOpen = false
+        Qt.callLater(function() { if (root.opened) keyCatcher.forceActiveFocus() })
+    }
+
+    function confirmGpuRestart() {
+        var id = pendingGpuMode
+        pendingGpuMode = ""
+        gpuRestartConfirmOpen = false
+        Qt.callLater(function() { if (root.opened) keyCatcher.forceActiveFocus() })
+        if (id) beginFirmwareGpuMode(id)
+    }
+
     function setGpuMode(id) {
+        if (gpuModeProc.running || gpuModeRestarting) return
         var def = Model.gpuModeDef(id)
-        setEcoPending(gpuMux && id === "eco")
-        if (armourySupported.gpuMux && (def.mux === 0) !== targetMux) {
-            queuedMux = def.mux
-            setArmouryAttr("gpu_mux_mode", def.mux)
+        if (!def || id === gpuMode) return
+        gpuModeError = ""
+
+        if (gpuRebootPending || Model.gpuModeNeedsRestart(activeGpuMode, id)) {
+            requestGpuRestart(id)
             return
         }
-        if (ecoPending) return
-        if (armourySupported.dgpuDisable && (def.dgpuDisable === 1) !== targetDgpu) {
-            queuedDgpu = def.dgpuDisable
-            setArmouryAttr("dgpu_disable", def.dgpuDisable)
+
+        if (!cardwireAvailable) {
+            gpuModeError = "Cardwire is not installed or its daemon is unavailable."
+            checkCardwire.running = true
+            return
         }
+
+        var liveMode = Model.cardwireModeForGpuMode(id)
+        if (!liveMode) {
+            gpuModeError = "This mode cannot be applied live."
+            return
+        }
+        gpuModeOperation = "live"
+        gpuModeTargetId = id
+        gpuModeProc.command = ["cardwire", "set", liveMode]
+        gpuModeProc.running = true
+    }
+
+    function beginFirmwareGpuMode(id) {
+        if (gpuModeProc.running) return
+        var def = Model.gpuModeDef(id)
+        gpuModeOperation = "firmware"
+        gpuModeTargetId = id
+        gpuModeStep = 0
+        gpuModeTargetMux = def.mux
+        gpuModeTargetDgpu = def.dgpuDisable
+
+        if (armourySupported.gpuMux) {
+            gpuModeStep = 1
+            gpuModeProc.command = ["asusctl", "armoury", "set", "gpu_mux_mode", String(gpuModeTargetMux)]
+            gpuModeProc.running = true
+        } else if (armourySupported.dgpuDisable) {
+            gpuModeStep = 2
+            gpuModeProc.command = ["asusctl", "armoury", "set", "dgpu_disable", String(gpuModeTargetDgpu)]
+            gpuModeProc.running = true
+        } else {
+            gpuModeOperation = ""
+            gpuModeTargetId = ""
+            gpuModeError = "This laptop does not expose an ASUS GPU switch."
+        }
+    }
+
+    function finishFirmwareGpuMode() {
+        var id = gpuModeTargetId
+        gpuModeStep = 0
+        gpuModeTargetMux = -1
+        gpuModeTargetDgpu = -1
+        gpuModeOperation = ""
+
+        // A confirmed Eco/Standard transition from Ultimate needs Cardwire's
+        // live policy restored after the MUX has moved back to Hybrid. The
+        // post-boot hook consumes this small user-owned marker.
+        if (id && id !== "ultimate" && cardwireAvailable) {
+            pendingGpuMode = id
+            pendingGpuModeProc.command = ["bash", "-c",
+                "mkdir -p \"$HOME/.local/state/omarchy-asus\" && printf '%s\\n' " + id + " > \"$HOME/.local/state/omarchy-asus/pending-gpu-mode\""]
+            pendingGpuModeProc.running = true
+            return
+        }
+        startGpuRestart()
+    }
+
+    function startGpuRestart() {
+        pendingGpuMode = ""
+        gpuModeRestarting = true
+        root.close()
+        restartProc.command = ["omarchy", "system", "reboot"]
+        restartProc.running = true
     }
 
     function setEcoPending(on) {
@@ -583,13 +681,19 @@ Panel {
                                 Button {
                                     required property var modelData
                                     width: gRow.cw
-                                    // Ultimate needs the mux; hiding it outright would
-                                    // shuffle the row, so it is disabled instead.
-                                    enabled: modelData.id !== "ultimate" ? root.armourySupported.dgpuDisable || root.armourySupported.gpuMux : root.armourySupported.gpuMux
+                                    // Ultimate needs the firmware MUX. Eco and
+                                    // Standard use Cardwire's live controller.
+                                    enabled: !root.gpuModeRestarting && (modelData.id !== "ultimate"
+                                        ? root.cardwireAvailable
+                                        : root.armourySupported.gpuMux)
                                     opacity: enabled ? 1 : 0.4
                                     iconText: modelData.icon; iconSize: Style.font.title
                                     text: modelData.name
-                                    tooltipText: enabled ? modelData.tip : modelData.tip + "\n\nNot available: this laptop has no MUX switch."
+                                    tooltipText: enabled
+                                        ? modelData.tip
+                                        : (modelData.id === "ultimate"
+                                            ? modelData.tip + "\n\nNot available: this laptop has no MUX switch."
+                                            : modelData.tip + "\n\nCardwire is not available yet.")
                                     fontSize: Style.font.bodySmall
                                     foreground: root.bar.foreground; fontFamily: root.bar.fontFamily
                                     horizontalPadding: Style.spacing.controlPaddingX
@@ -601,7 +705,8 @@ Panel {
                             }
                         }
                         Text { width: parent.width; text: Model.gpuModeDef(root.gpuMode).desc; wrapMode: Text.WordWrap; color: Qt.darker(root.bar.foreground, 1.4); font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption }
-                        Text { visible: root.gpuRebootPending; width: parent.width; text: "\u{F0709}  Restart" + (root.ecoPending && root.gpuMux ? " twice" : "") + " to switch to " + Model.gpuModeDef(root.gpuMode).name + " (running " + Model.gpuModeDef(root.activeGpuMode).name + ")"; wrapMode: Text.WordWrap; color: "#cc9944"; font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+                        Text { visible: root.gpuModeError !== ""; width: parent.width; text: root.gpuModeError; wrapMode: Text.WordWrap; color: Color.urgent; font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption }
+                        Text { visible: root.gpuRebootPending; width: parent.width; text: "\u{F0709}  Restart" + (root.ecoPending && root.gpuMux === 0 ? " twice" : "") + " to switch to " + Model.gpuModeDef(root.gpuMode).name + " (running " + Model.gpuModeDef(root.activeGpuMode).name + ")"; wrapMode: Text.WordWrap; color: "#cc9944"; font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
                     }
 
                     // SCREEN — refresh rate comes from Hyprland, overdrive from
@@ -927,9 +1032,40 @@ Panel {
             }
         }
 
+        Item {
+            id: gpuConfirmLayer
+            anchors.fill: parent
+            visible: root.gpuRestartConfirmOpen
+            z: 20
+            focus: visible
+
+            Keys.onPressed: function(event) {
+                if (gpuRestartConfirm.handleKey(event)) event.accepted = true
+            }
+
+            ConfirmDialog {
+                id: gpuRestartConfirm
+                anchors.fill: parent
+                opened: root.gpuRestartConfirmOpen
+                message: "Switching to " + Model.gpuModeDef(root.pendingGpuMode).name + " changes the display GPU and requires restarting the computer. Apply the mode and restart now?"
+                cancelText: "Cancel"
+                confirmText: "Restart"
+                background: Color.popups.background
+                foreground: root.bar.foreground
+                scrim: Qt.rgba(0, 0, 0, 0.72)
+                selectedBackground: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.08)
+                selectedText: Color.accent
+                fontFamily: root.bar.fontFamily
+                cornerRadius: Style.cornerRadius
+                onCanceled: root.cancelGpuRestart()
+                onConfirmed: root.confirmGpuRestart()
+            }
+        }
+
         PanelKeyCatcher {
             id: keyCatcher
             anchors.fill: parent
+            blocked: root.gpuRestartConfirmOpen || root.gpuModeRestarting
             onCloseRequested: root.close()
             onMoveRequested: function(dx, dy) { if (dy !== 0) flick.contentY = Math.max(0, Math.min(flick.contentHeight - flick.height, flick.contentY - dy * 40)) }
         }
@@ -937,12 +1073,20 @@ Panel {
 
     IpcHandler { target: "io.github.moneytosms.asus"; function open() { root.open() } function close() { root.close() } function show() { root.open() } function hide() { root.close() } function toggle() { root.toggle() } function refresh() { root.refresh() } }
     onOpenedChanged: { if (opened) { Qt.callLater(refresh); cursorActive = false } }
-    Component.onCompleted: { checkEcoMarker.running = true; checkHyprmoncfg.running = true }
+    Component.onCompleted: { checkEcoMarker.running = true; checkCardwire.running = true; checkHyprmoncfg.running = true }
 
     // Marker must be read before the first armoury refresh, so it gates checkAsusctl.
     Process { id: checkEcoMarker; command: ["test", "-f", root.ecoMarker]; onExited: function(ec) { root.ecoPending = ec === 0; checkAsusctl.running = true } }
     Process { id: ecoMarkerProc }
     Process { id: checkAsusctl; command: ["which", "asusctl"]; onExited: function(ec) { root.asusctlAvailable = ec === 0; if (root.asusctlAvailable) refresh() } }
+    Process {
+        id: checkCardwire
+        command: ["bash", "-c", "command -v cardwire >/dev/null 2>&1 && cardwire manager status >/dev/null 2>&1"]
+        onExited: function(ec) {
+            root.cardwireAvailable = ec === 0
+            if (root.cardwireAvailable && !cardwireGetProc.running) cardwireGetProc.running = true
+        }
+    }
     Process { id: profileProc; command: ["asusctl", "profile", "get"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { var p = Model.parseCurrentProfile(text); if (p) { root.currentProfile = p; var i = root.profiles.indexOf(p); if (i >= 0) root.profileIndex = i }; root.acProfile = Model.parseProfiles(text); root.profileLoaded = true } } }
     Process { id: infoProc; command: ["asusctl", "info", "--show-supported"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.supported = Model.parseSupportedFeatures(text); root.infoLoaded = true } } }
     Process { id: batteryProc; command: ["asusctl", "battery", "info"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.batteryLimit = Model.parseBatteryInfo(text).limit } } }
@@ -986,7 +1130,7 @@ Panel {
         root.armouryDefaults = a.defaults
         var v = a.values, r = a.ranges
         if (v.panel_overdrive !== undefined) root.panelOverdrive = v.panel_overdrive === 1
-        if (v.gpu_mux_mode !== undefined) root.gpuMux = v.gpu_mux_mode === 0
+        if (v.gpu_mux_mode !== undefined) root.gpuMux = v.gpu_mux_mode
         if (v.dgpu_disable !== undefined) root.dgpuDisable = v.dgpu_disable === 1
         if (v.ppt_pl1_spl !== undefined) root.pptPl1 = v.ppt_pl1_spl
         if (r.ppt_pl1_spl) { root.pptPl1Min = r.ppt_pl1_spl.min; root.pptPl1Max = r.ppt_pl1_spl.max }
@@ -996,6 +1140,7 @@ Panel {
         if (r.nv_dynamic_boost) { root.nvDynBoostMin = r.nv_dynamic_boost.min; root.nvDynBoostMax = r.nv_dynamic_boost.max }
         if (v.nv_temp_target !== undefined) root.nvTempTarget = v.nv_temp_target
         if (r.nv_temp_target) { root.nvTempTargetMin = r.nv_temp_target.min; root.nvTempTargetMax = r.nv_temp_target.max }
+        root.armouryLoaded = true
         if ((a.supported.gpuMux || a.supported.dgpuDisable) && !gpuQueueProc.running) gpuQueueProc.running = true
     } } }
     Process { id: gpuQueueProc; command: Model.gpuQueueCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
@@ -1003,7 +1148,7 @@ Panel {
         root.queuedDgpu = q.dgpu_disable
         root.queuedMux = q.gpu_mux_mode
         // Rebooted out of Ultimate: finish the pending Eco switch.
-        if (root.ecoPending && !root.gpuMux) { root.setEcoPending(false); root.setGpuMode("eco") }
+        if (root.ecoPending && root.gpuMux !== 0) { root.setEcoPending(false); root.setArmouryAttr("dgpu_disable", 1) }
     } } }
     Process { id: monitorProc; command: ["hyprctl", "-j", "monitors"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { var m = Model.parseMonitors(text); if (m) root.monitor = m } } }
     Process { id: checkHyprmoncfg; command: ["which", "hyprmoncfg"]; onExited: function(ec) { root.hyprmoncfgAvailable = ec === 0; if (root.hyprmoncfgAvailable && !hyprmoncfgProc.running) hyprmoncfgProc.running = true } }
@@ -1028,6 +1173,78 @@ Panel {
     }
     Process { id: hyprmoncfgSaveProc; onExited: function() { if (!monitorProc.running) monitorProc.running = true } }
     Process { id: sensorProc; command: Model.sensorCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.sensors = Model.parseSensors(text) } } }
+    Process {
+        id: gpuModeProc
+        onExited: function(ec) {
+            if (gpuModeOperation === "live") {
+                if (ec !== 0) gpuModeError = "Cardwire could not switch to " + Model.gpuModeDef(gpuModeTargetId).name + "."
+                else {
+                    gpuModeError = ""
+                    if (!cardwireGetProc.running) cardwireGetProc.running = true
+                }
+                gpuModeOperation = ""
+                gpuModeTargetId = ""
+                return
+            }
+
+            if (gpuModeOperation !== "firmware") return
+            if (ec !== 0) {
+                gpuModeError = "ASUS firmware rejected the GPU mode change; nothing was restarted."
+                gpuModeStep = 0; gpuModeTargetMux = -1; gpuModeTargetDgpu = -1
+                gpuModeOperation = ""; gpuModeTargetId = ""
+                if (!armouryProc.running) armouryProc.running = true
+                return
+            }
+            if (gpuModeStep === 1 && armourySupported.dgpuDisable) {
+                gpuModeStep = 2
+                gpuModeProc.command = ["asusctl", "armoury", "set", "dgpu_disable", String(gpuModeTargetDgpu)]
+                gpuModeProc.running = true
+                return
+            }
+
+            finishFirmwareGpuMode()
+            if (!armouryProc.running) armouryProc.running = true
+        }
+    }
+    Process {
+        id: cardwireGetProc
+        command: ["cardwire", "get"]
+        stdout: StdioCollector {
+            waitForEnd: true
+            onStreamFinished: {
+                var mode = Model.parseCardwireMode(text)
+                if (mode) root.cardwireMode = mode
+            }
+        }
+        onExited: function(ec) {
+            if (ec !== 0) {
+                root.cardwireMode = ""
+                root.cardwireAvailable = false
+            }
+        }
+    }
+    Process {
+        id: pendingGpuModeProc
+        onExited: function(ec) {
+            root.pendingGpuMode = ""
+            if (ec !== 0) {
+                root.gpuModeError = "Could not save the confirmed mode for after restart; the computer was not restarted."
+                root.gpuModeRestarting = false
+                return
+            }
+            root.startGpuRestart()
+        }
+    }
+    Process {
+        id: restartProc
+        onExited: function(ec) {
+            if (ec !== 0) {
+                root.gpuModeRestarting = false
+                root.gpuModeError = "The restart command failed; the requested mode remains queued."
+                if (!armouryProc.running) armouryProc.running = true
+            }
+        }
+    }
     Process { id: actionProc; onExited: function() { if (!profileProc.running) profileProc.running = true; if (!batteryProc.running) batteryProc.running = true; if (!ledProc.running) ledProc.running = true; if (!armouryProc.running) armouryProc.running = true; if (!monitorProc.running) monitorProc.running = true; if (!fanDetailProc.running) fanDetailProc.running = true } }
     Timer { interval: root.refreshInterval; running: root.opened && root.asusctlAvailable; repeat: true; onTriggered: root.refresh() }
 

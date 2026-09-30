@@ -14,6 +14,11 @@ const M = {}
 vm.createContext(M)
 vm.runInContext(fs.readFileSync(path.join(__dirname, "Model.js"), "utf8"), M)
 
+// Profile changes update the target for the power source in use. asusd then
+// applies each target automatically when AC or battery power changes.
+assert.deepEqual(M.profileCommand("Performance", false), ["asusctl", "profile", "set", "--ac", "Performance"])
+assert.deepEqual(M.profileCommand("Quiet", true), ["asusctl", "profile", "set", "--battery", "Quiet"])
+
 // ---------------------------------------------------------------- armoury
 const ARMOURY = `Multiple asusd interfaces devices found
 charge_mode:
@@ -129,11 +134,43 @@ assert.deepEqual(M.parseHyprmoncfgStatus(""), { managed: false, profile: "" })
 assert.deepEqual(M.parseHyprmoncfgStatus("command not found"), { managed: false, profile: "" })
 
 // ---------------------------------------------------------------- gpu mode
-assert.equal(M.gpuModeId(0, 0), "standard")
-assert.equal(M.gpuModeId(0, 1), "eco")
-assert.equal(M.gpuModeId(1, 0), "ultimate")
+// ASUS firmware maps gpu_mux_mode=0 to dGPU-direct (Ultimate) and =1 to the
+// hybrid/iGPU path. The legacy firmware parser still recognizes Eco when
+// dgpu_disable=1; the live Cardwire Eco definition intentionally keeps that
+// firmware value at 0 so Standard can be restored without another reboot.
+assert.equal(M.gpuModeId(1, 1), "eco")
+assert.equal(M.gpuModeId(1, 0), "standard")
+assert.equal(M.gpuModeId(0, 0), "ultimate")
+assert.equal(M.gpuModes[0].dgpuDisable, 0)
+assert.equal(M.gpuModes[0].live, "integrated")
+assert.equal(M.gpuModes[1].live, "hybrid")
+assert.equal(M.gpuModes[0].reboot, false)
+assert.equal(M.gpuModes[1].reboot, false)
+assert.equal(M.gpuModes[2].reboot, true)
+assert.equal(M.parseCardwireMode("Current Mode: Integrated\nAvailable Mode: integrated, hybrid"), "integrated")
+assert.equal(M.parseCardwireMode("Hybrid"), "hybrid")
+assert.equal(M.parseCardwireMode("daemon unavailable"), "")
+assert.equal(M.cardwireModeForGpuMode("eco"), "integrated")
+assert.equal(M.cardwireModeForGpuMode("standard"), "hybrid")
+assert.equal(M.cardwireModeForGpuMode("ultimate"), "")
+assert.equal(M.gpuModeFromCardwire("integrated"), "eco")
+assert.equal(M.gpuModeFromCardwire("hybrid"), "standard")
+assert.equal(M.gpuModeNeedsRestart("standard", "ultimate"), true)
+assert.equal(M.gpuModeNeedsRestart("ultimate", "eco"), true)
+assert.equal(M.gpuModeNeedsRestart("eco", "standard"), false)
+
 assert.deepEqual(JSON.parse(JSON.stringify(M.parseGpuQueue("dgpu_disable i 1\ngpu_mux_mode i -1\n"))), { dgpu_disable: 1, gpu_mux_mode: -1 })
 assert.deepEqual(JSON.parse(JSON.stringify(M.parseGpuQueue("dgpu_disable \ngpu_mux_mode \n"))), { dgpu_disable: -1, gpu_mux_mode: -1 })
+
+// Live Cardwire state must not invert raw firmware MUX values, and an
+// unchanged firmware queue must not mask a live Eco selection.
+assert.deepEqual(M.gpuModeState(1, false, -1, -1, "integrated"), { active: "eco", target: "eco", rebootPending: false })
+assert.deepEqual(M.gpuModeState(1, false, 1, 0, "integrated"), { active: "eco", target: "eco", rebootPending: false })
+assert.deepEqual(M.gpuModeState(1, false, 0, 0, "hybrid"), { active: "standard", target: "ultimate", rebootPending: true })
+assert.deepEqual(M.gpuModeState(0, false, 1, 0, "integrated"), { active: "ultimate", target: "standard", rebootPending: true })
+assert.deepEqual(M.gpuModeState(1, false, -1, 1, ""), { active: "standard", target: "eco", rebootPending: true })
+
+assert.deepEqual(M.gpuModeState(1, true, -1, -1, "hybrid"), { active: "eco", target: "eco", rebootPending: false })
 
 // ---------------------------------------------------------------- features
 // asusctl 6.x names the charge limit ChargeControlEndThreshold; matching only

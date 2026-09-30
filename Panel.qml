@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Services.UPower
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -328,7 +329,7 @@ Panel {
         if (supported.hasFanCurve) { if (!fanDetailProc.running) fanDetailProc.running = true }
     }
 
-    function setProfile(p) { if (!p || actionProc.running) return; actionProc.command = ["asusctl", "profile", "set", p]; actionProc.running = true }
+    function setProfile(p) { if (!p || actionProc.running) return; actionProc.command = Model.profileCommand(p, UPower.onBattery); actionProc.running = true }
     function cycleProfile(d) { profileIndex = Model.selectProfileIndex(profileIndex, d, profiles); setProfile(profiles[profileIndex]) }
 
     function applyEffect() {

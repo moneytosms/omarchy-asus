@@ -1,5 +1,7 @@
 # omarchy-asus
 
+Local fork changes, screenshot, and readiness notes: [customizations](docs/customizations/README.md).
+
 A tabbed ASUS laptop control panel for the [Omarchy](https://omarchy.org) bar,
 built on [`asusctl`](https://asus-linux.org/). Power profiles, keyboard RGB,
 editable fan curves, and firmware limits — organized like

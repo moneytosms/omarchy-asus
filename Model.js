@@ -439,21 +439,23 @@ var presetColors = [
 // indices are not stable across boots, so chips are matched by their `name`
 // file rather than a hardcoded hwmonN path. Reading PCI runtime_status does
 // not wake a suspended dGPU; nvidia-smi is only queried when the card is
-// already active, since querying it unconditionally can wake the card.
+// already active (or "unsupported": runtime PM off, the card never sleeps),
+// since querying it unconditionally can wake the card. The battery is
+// matched by glob: it is BAT1 on some ROG models (GU606, from PR #7).
 var sensorScript =
     'for h in /sys/class/hwmon/*; do n=$(cat "$h/name" 2>/dev/null); case "$n" in ' +
     'coretemp|k10temp|zenpower) echo "cpu_temp=$(cat "$h/temp1_input" 2>/dev/null)";; ' +
     'asus) echo "fan_cpu=$(cat "$h/fan1_input" 2>/dev/null)"; echo "fan_gpu=$(cat "$h/fan2_input" 2>/dev/null)";; ' +
     'esac; done; ' +
-    'b=/sys/class/power_supply/BAT0; if [ -d "$b" ]; then ' +
+    'for b in /sys/class/power_supply/BAT*; do [ -d "$b" ] || continue; ' +
     'echo "bat_pct=$(cat $b/capacity 2>/dev/null)"; ' +
     'echo "bat_status=$(cat $b/status 2>/dev/null)"; ' +
-    'echo "bat_power=$(cat $b/power_now 2>/dev/null)"; fi; ' +
+    'echo "bat_power=$(cat $b/power_now 2>/dev/null)"; break; done; ' +
     'g=""; for d in /sys/bus/pci/devices/*; do ' +
     '[ "$(cat "$d/vendor" 2>/dev/null)" = "0x10de" ] || continue; ' +
     'case "$(cat "$d/class" 2>/dev/null)" in 0x03*) g="$d"; break;; esac; done; ' +
     'if [ -n "$g" ]; then s=$(cat "$g/power/runtime_status" 2>/dev/null); echo "gpu_runtime=$s"; ' +
-    'if [ "$s" = "active" ] && command -v nvidia-smi >/dev/null 2>&1; then ' +
+    'if { [ "$s" = "active" ] || [ "$s" = "unsupported" ]; } && command -v nvidia-smi >/dev/null 2>&1; then ' +
     'nvidia-smi --query-gpu=temperature.gpu,power.draw,utilization.gpu --format=csv,noheader,nounits 2>/dev/null ' +
     '| head -1 | tr -d " " | { IFS=, read t p u; echo "gpu_temp=$t"; echo "gpu_power=$p"; echo "gpu_util=$u"; }; fi; fi'
 

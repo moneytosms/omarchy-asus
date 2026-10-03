@@ -123,6 +123,10 @@ function parseProfiles(raw) {
     return r
 }
 
+function profileCommand(profile, onBattery) {
+    return ["asusctl", "profile", "set", onBattery ? "--battery" : "--ac", profile]
+}
+
 // ============================================================
 // Feature detection
 // ============================================================

@@ -14,6 +14,10 @@ const M = {}
 vm.createContext(M)
 vm.runInContext(fs.readFileSync(path.join(__dirname, "Model.js"), "utf8"), M)
 
+// Store profile changes for the power source currently in use.
+assert.deepEqual(M.profileCommand("Performance", false), ["asusctl", "profile", "set", "--ac", "Performance"])
+assert.deepEqual(M.profileCommand("Quiet", true), ["asusctl", "profile", "set", "--battery", "Quiet"])
+
 // ---------------------------------------------------------------- armoury
 const ARMOURY = `Multiple asusd interfaces devices found
 charge_mode:

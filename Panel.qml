@@ -375,7 +375,22 @@ Panel {
     }
     function selectFanProfile(p) { if (!p || p === fanProfile) return; fanEditProfile = p; if (!fanModProc.running) fanModProc.running = true }
 
-    function setArmouryAttr(a, v) { actionProc.command = ["asusctl", "armoury", "set", a, String(v)]; actionProc.running = true }
+    // Armoury writes queue behind a running action instead of overwriting its
+    // command: "Defaults" and a two-attribute GPU switch issue several in a
+    // row, and all but the first used to be dropped.
+    property var armouryQueue: []
+    function setArmouryAttr(a, v) {
+        var cmd = ["asusctl", "armoury", "set", a, String(v)]
+        if (actionProc.running) { armouryQueue = armouryQueue.concat([cmd]); return }
+        actionProc.command = cmd; actionProc.running = true
+    }
+    function runNextArmoury() {
+        if (actionProc.running || armouryQueue.length === 0) return
+        var q = armouryQueue.slice()
+        actionProc.command = q.shift()
+        armouryQueue = q
+        actionProc.running = true
+    }
     function togglePanelOverdrive() { panelOverdrive = !panelOverdrive; setArmouryAttr("panel_overdrive", panelOverdrive ? 1 : 0) }
     function setPptPl1(v) { pptPl1 = Math.round(v); setArmouryAttr("ppt_pl1_spl", pptPl1) }
     function setPptPl2(v) { pptPl2 = Math.round(v); setArmouryAttr("ppt_pl2_sppt", pptPl2) }
@@ -392,20 +407,17 @@ Panel {
     }
 
     // GPU mode — Eco/Standard/Ultimate collapse to the mux + dgpu_disable
-    // pair. Only the attribute that actually changes is written, so an Eco
-    // switch on a mux-less laptop is still a single valid call.
+    // pair. Only the attributes that actually change are written (see
+    // Model.gpuModeWrites), so an Eco switch on a mux-less laptop is still a
+    // single valid call.
     function setGpuMode(id) {
-        var def = Model.gpuModeDef(id)
+        if (!Model.gpuModeAvailable(id, armourySupported.gpuMux, armourySupported.dgpuDisable)) return
         setEcoPending(gpuMux && id === "eco")
-        if (armourySupported.gpuMux && (def.mux === 0) !== targetMux) {
-            queuedMux = def.mux
-            setArmouryAttr("gpu_mux_mode", def.mux)
-            return
-        }
-        if (ecoPending) return
-        if (armourySupported.dgpuDisable && (def.dgpuDisable === 1) !== targetDgpu) {
-            queuedDgpu = def.dgpuDisable
-            setArmouryAttr("dgpu_disable", def.dgpuDisable)
+        var w = Model.gpuModeWrites(id, { hasMux: armourySupported.gpuMux, hasDgpu: armourySupported.dgpuDisable,
+                                          targetMux: targetMux, targetDgpu: targetDgpu, ecoChain: ecoPending })
+        for (var i = 0; i < w.length; i++) {
+            if (w[i][0] === "gpu_mux_mode") queuedMux = w[i][1]; else queuedDgpu = w[i][1]
+            setArmouryAttr(w[i][0], w[i][1])
         }
     }
 
@@ -583,13 +595,13 @@ Panel {
                                 Button {
                                     required property var modelData
                                     width: gRow.cw
-                                    // Ultimate needs the mux; hiding it outright would
-                                    // shuffle the row, so it is disabled instead.
-                                    enabled: modelData.id !== "ultimate" ? root.armourySupported.dgpuDisable || root.armourySupported.gpuMux : root.armourySupported.gpuMux
+                                    // Ultimate needs the mux, Eco needs dgpu_disable; hiding
+                                    // one outright would shuffle the row, so it is disabled.
+                                    enabled: Model.gpuModeAvailable(modelData.id, root.armourySupported.gpuMux, root.armourySupported.dgpuDisable)
                                     opacity: enabled ? 1 : 0.4
                                     iconText: modelData.icon; iconSize: Style.font.title
                                     text: modelData.name
-                                    tooltipText: enabled ? modelData.tip : modelData.tip + "\n\nNot available: this laptop has no MUX switch."
+                                    tooltipText: enabled ? modelData.tip : modelData.tip + "\n\nNot available: " + (modelData.id === "eco" ? "this laptop cannot power the dGPU off." : "this laptop has no MUX switch.")
                                     fontSize: Style.font.bodySmall
                                     foreground: root.bar.foreground; fontFamily: root.bar.fontFamily
                                     horizontalPadding: Style.spacing.controlPaddingX
@@ -1028,7 +1040,7 @@ Panel {
     }
     Process { id: hyprmoncfgSaveProc; onExited: function() { if (!monitorProc.running) monitorProc.running = true } }
     Process { id: sensorProc; command: Model.sensorCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.sensors = Model.parseSensors(text) } } }
-    Process { id: actionProc; onExited: function() { if (!profileProc.running) profileProc.running = true; if (!batteryProc.running) batteryProc.running = true; if (!ledProc.running) ledProc.running = true; if (!armouryProc.running) armouryProc.running = true; if (!monitorProc.running) monitorProc.running = true; if (!fanDetailProc.running) fanDetailProc.running = true } }
+    Process { id: actionProc; onExited: function() { if (root.armouryQueue.length > 0) { Qt.callLater(root.runNextArmoury); return } if (!profileProc.running) profileProc.running = true; if (!batteryProc.running) batteryProc.running = true; if (!ledProc.running) ledProc.running = true; if (!armouryProc.running) armouryProc.running = true; if (!monitorProc.running) monitorProc.running = true; if (!fanDetailProc.running) fanDetailProc.running = true } }
     Timer { interval: root.refreshInterval; running: root.opened && root.asusctlAvailable; repeat: true; onTriggered: root.refresh() }
 
     // Sensors run on their own, faster tick — the asusctl round-trip is much

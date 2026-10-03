@@ -132,6 +132,31 @@ assert.deepEqual(M.parseHyprmoncfgStatus("command not found"), { managed: false,
 assert.equal(M.gpuModeId(0, 0), "standard")
 assert.equal(M.gpuModeId(0, 1), "eco")
 assert.equal(M.gpuModeId(1, 0), "ultimate")
+// Eco needs dgpu_disable, Ultimate needs the mux; a mux-only laptop must not
+// offer an Eco button that writes nothing (idea from PR #5).
+assert.equal(M.gpuModeAvailable("eco", true, false), false)
+assert.equal(M.gpuModeAvailable("eco", false, true), true)
+assert.equal(M.gpuModeAvailable("standard", true, false), true)
+assert.equal(M.gpuModeAvailable("standard", false, true), true)
+assert.equal(M.gpuModeAvailable("ultimate", false, true), false)
+assert.equal(M.gpuModeAvailable("ultimate", true, false), true)
+
+// gpuModeWrites: targetMux = next boot is discrete, targetDgpu = next boot has dGPU off.
+const both = { hasMux: true, hasDgpu: true, ecoChain: false }
+const writes = (id, tm, td, extra) => JSON.parse(JSON.stringify(M.gpuModeWrites(id, Object.assign({}, both, { targetMux: tm, targetDgpu: td }, extra || {}))))
+// Eco -> Ultimate must re-enable the dGPU too: the kernel refuses mux=0 while it is off.
+assert.deepEqual(writes("ultimate", false, true), [["gpu_mux_mode", 0], ["dgpu_disable", 0]])
+assert.deepEqual(writes("ultimate", false, false), [["gpu_mux_mode", 0]])
+assert.deepEqual(writes("eco", false, false), [["dgpu_disable", 1]])
+assert.deepEqual(writes("standard", false, true), [["dgpu_disable", 0]])
+assert.deepEqual(writes("standard", true, false), [["gpu_mux_mode", 1]])
+// Ultimate queued but not rebooted, then Eco: one click must queue both.
+assert.deepEqual(writes("eco", true, false), [["gpu_mux_mode", 1], ["dgpu_disable", 1]])
+// Running Ultimate -> Eco: only the mux now; dgpu_disable follows next boot.
+assert.deepEqual(writes("eco", true, false, { ecoChain: true }), [["gpu_mux_mode", 1]])
+assert.deepEqual(writes("standard", false, false), [])
+assert.deepEqual(writes("eco", false, false, { hasDgpu: false }), [])
+assert.deepEqual(writes("eco", false, false, { hasMux: false }), [["dgpu_disable", 1]])
 assert.deepEqual(JSON.parse(JSON.stringify(M.parseGpuQueue("dgpu_disable i 1\ngpu_mux_mode i -1\n"))), { dgpu_disable: 1, gpu_mux_mode: -1 })
 assert.deepEqual(JSON.parse(JSON.stringify(M.parseGpuQueue("dgpu_disable \ngpu_mux_mode \n"))), { dgpu_disable: -1, gpu_mux_mode: -1 })
 

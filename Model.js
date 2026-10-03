@@ -539,6 +539,29 @@ function parseGpuQueue(raw) {
     return out
 }
 
+// Which attribute each mode needs. Eco on a mux-only laptop has nothing to
+// write, so it is disabled rather than offered as a dead button.
+function gpuModeAvailable(id, hasMux, hasDgpuDisable) {
+    if (id === "ultimate") return hasMux
+    if (id === "eco") return hasDgpuDisable
+    return hasMux || hasDgpuDisable
+}
+
+// The armoury writes that move the next boot to mode `id`, as [attr, value]
+// pairs. s.targetMux / s.targetDgpu describe the next boot (queued value
+// wins), so a stale queued value is always overwritten. Both attributes go
+// in one click: asusd applies the queue sorted by path at shutdown, so
+// dgpu_disable lands before gpu_mux_mode — the order Eco -> Ultimate needs,
+// since the kernel refuses mux=0 while the dGPU is off. The reverse
+// (running Ultimate -> Eco) is s.ecoChain: only the mux is queued and
+// dgpu_disable follows on the next boot.
+function gpuModeWrites(id, s) {
+    var def = gpuModeDef(id), w = []
+    if (s.hasMux && (def.mux === 0) !== s.targetMux) w.push(["gpu_mux_mode", def.mux])
+    if (s.hasDgpu && !s.ecoChain && (def.dgpuDisable === 1) !== s.targetDgpu) w.push(["dgpu_disable", def.dgpuDisable])
+    return w
+}
+
 function gpuModeDef(id) {
     for (var i = 0; i < gpuModes.length; i++) if (gpuModes[i].id === id) return gpuModes[i]
     return gpuModes[1]

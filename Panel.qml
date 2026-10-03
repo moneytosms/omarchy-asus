@@ -1019,6 +1019,9 @@ Panel {
         root.queuedMux = q.gpu_mux_mode
         // Rebooted out of Ultimate: finish the pending Eco switch.
         if (root.ecoPending && !root.gpuMux) { root.setEcoPending(false); root.setGpuMode("eco") }
+        // Still in Ultimate with no mux switch queued: the write failed or was
+        // undone, so drop the stale marker. Skipped while writes are in flight.
+        else if (root.ecoPending && root.gpuMux && root.queuedMux !== 1 && !actionProc.running && root.armouryQueue.length === 0) root.setEcoPending(false)
     } } }
     Process { id: monitorProc; command: ["hyprctl", "-j", "monitors"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { var m = Model.parseMonitors(text); if (m) root.monitor = m } } }
     Process { id: checkHyprmoncfg; command: ["which", "hyprmoncfg"]; onExited: function(ec) { root.hyprmoncfgAvailable = ec === 0; if (root.hyprmoncfgAvailable && !hyprmoncfgProc.running) hyprmoncfgProc.running = true } }

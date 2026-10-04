@@ -445,10 +445,10 @@ var sensorScript =
     'coretemp|k10temp|zenpower) echo "cpu_temp=$(cat "$h/temp1_input" 2>/dev/null)";; ' +
     'asus) echo "fan_cpu=$(cat "$h/fan1_input" 2>/dev/null)"; echo "fan_gpu=$(cat "$h/fan2_input" 2>/dev/null)";; ' +
     'esac; done; ' +
-    'b=/sys/class/power_supply/BAT0; if [ -d "$b" ]; then ' +
+    'for b in /sys/class/power_supply/BAT*; do [ -d "$b" ] || continue; ' +
     'echo "bat_pct=$(cat $b/capacity 2>/dev/null)"; ' +
     'echo "bat_status=$(cat $b/status 2>/dev/null)"; ' +
-    'echo "bat_power=$(cat $b/power_now 2>/dev/null)"; fi; ' +
+    'echo "bat_power=$(cat $b/power_now 2>/dev/null)"; break; done; ' +
     'g=""; for d in /sys/bus/pci/devices/*; do ' +
     '[ "$(cat "$d/vendor" 2>/dev/null)" = "0x10de" ] || continue; ' +
     'case "$(cat "$d/class" 2>/dev/null)" in 0x03*) g="$d"; break;; esac; done; ' +

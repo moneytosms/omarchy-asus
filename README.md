@@ -84,14 +84,9 @@ things make it different from every other control here:
   name's *position* in that list is the value `asusd` reports for the active
   mode, so reading the names and the active index from the same source is what
   keeps the highlighted tile honest across `asusctl` versions.
-- **`asusctl` has no `slash --get`**, so the current state comes from `asusd`
-  over D-Bus. The `xyz.ljones.Slash` interface hangs off the *aura device*
-  object, whose path ends in a per-model device id
-  (`/xyz/ljones/aura/19b6_3_4`), so the plugin discovers the path rather than
-  hardcoding it. It calls `DeviceState` rather than reading the individual
-  properties, because the `.Mode` property reads back a stale `0` on
-  asusd 6.3.8 whatever the real mode is, while the `DeviceState` tuple
-  (`enabled`, `brightness`, `interval`, `mode`) is correct.
+- **The current state comes from `asusctl slash get`** (asusctl 6.4+), which
+  reports enabled, brightness, interval and the mode *by name*; the name is
+  mapped back to its index in the `slash list` order.
 
 - **The preview strip is drawn, not read.** `asusd` exposes no way to read the
   firmware's real frames, so each animation is a stylised impression written by

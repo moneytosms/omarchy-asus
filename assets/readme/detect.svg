@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320" role="img" aria-labelledby="t d">
+  <title id="t">How the panel decides what to show</title>
+  <desc id="d">asusctl and asusd report what the laptop supports: aura effects, firmware attributes, power profiles. The panel shows only those controls. Screen refresh rate goes to Hyprland directly, and to hyprmoncfg when its daemon runs.</desc>
+  <rect width="1200" height="320" rx="26" fill="#0d0d0d"/>
+  <rect x="0.5" y="0.5" width="1199" height="319" rx="25.5" fill="none" stroke="#2a2a2a"/>
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,monospace" text-anchor="middle">
+    <g fill="#161616" stroke="#2a2a2a">
+      <rect x="40" y="110" width="200" height="80" rx="6"/>
+      <rect x="320" y="30" width="330" height="64" rx="6"/><rect x="320" y="128" width="330" height="64" rx="6"/><rect x="320" y="226" width="330" height="64" rx="6"/>
+      <rect x="760" y="110" width="200" height="80" rx="6" fill="#1c241c" stroke="#44cc44"/>
+    </g>
+    <g stroke="#44cc44" stroke-width="2.5" fill="none" stroke-linecap="round">
+      <path d="M240 150 H280 V62 H318"/><path d="M240 150 H318"/><path d="M240 150 H280 V258 H318"/>
+      <path d="M650 62 H700 V150 H758"/><path d="M650 160 H758"/><path d="M650 258 H700 V150"/>
+    </g>
+    <g fill="#e8e8e8" font-size="19">
+      <text x="140" y="146">your laptop</text><text x="140" y="172" font-size="14" fill="#7a7a7a">asusd + asusctl</text>
+      <text x="485" y="58" font-size="16">info --show-supported</text><text x="485" y="80" font-size="13" fill="#7a7a7a">aura effects</text>
+      <text x="485" y="156" font-size="16">armoury list</text><text x="485" y="178" font-size="13" fill="#7a7a7a">firmware limits + ranges</text>
+      <text x="485" y="254" font-size="16">profile get / set</text><text x="485" y="276" font-size="13" fill="#7a7a7a">per AC / battery</text>
+      <text x="860" y="146">panel</text><text x="860" y="172" font-size="14" fill="#44cc44">only what is supported</text>
+    </g>
+    <text x="1040" y="132" font-size="13" fill="#7a7a7a" text-anchor="start">Screen refresh:</text>
+    <text x="1040" y="154" font-size="13" fill="#7a7a7a" text-anchor="start">Hyprland direct,</text>
+    <text x="1040" y="176" font-size="13" fill="#7a7a7a" text-anchor="start">+ hyprmoncfg if</text>
+    <text x="1040" y="198" font-size="13" fill="#7a7a7a" text-anchor="start">its daemon runs</text>
+  </g>
+</svg>

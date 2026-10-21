@@ -1,4 +1,8 @@
-# omarchy-asus
+<h1 align="center">omarchy-asus</h1>
+
+<p align="center">
+  <img src="./assets/readme/hero.svg" width="100%" alt="omarchy-asus: a tabbed ASUS laptop control panel for the Omarchy bar, shown as a mock of the Main tab with live CPU, GPU, battery and power readings.">
+</p>
 
 A tabbed ASUS laptop control panel for the [Omarchy](https://omarchy.org) bar,
 built on [`asusctl`](https://asus-linux.org/). Power profiles, keyboard RGB,
@@ -22,6 +26,10 @@ no context, keyboard RGB effects that silently no-op on unsupported hardware,
 a fan curve toggle for the master enable that never appears in the UI. This
 plugin detects what your specific model reports supporting and only shows
 that.
+
+<p align="center">
+  <img src="./assets/readme/detect.svg" width="100%" alt="asusctl info, armoury list and profile commands report what the laptop supports; the panel shows only those controls. Screen refresh goes to Hyprland, plus hyprmoncfg if its daemon runs.">
+</p>
 
 ## Features
 

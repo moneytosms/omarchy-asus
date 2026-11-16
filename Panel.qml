@@ -222,10 +222,7 @@ Panel {
     readonly property var tabs: {
         var t = [{ key: "main", label: "Main" }]
         if (root.supported.hasAura || !root.infoLoaded) t.push({ key: "rgb", label: "RGB" })
-        // Always offered: the tab is what carries the "this laptop has no
-        // ledbar" message, so hiding it would be the silent omission the
-        // greying-out exists to avoid.
-        t.push({ key: "slash", label: "Slash" })
+        if (root.supported.hasSlash || !root.infoLoaded) t.push({ key: "slash", label: "Slash" })
         if (root.supported.hasFanCurve || !root.infoLoaded) t.push({ key: "fan", label: "Fan" })
         t.push({ key: "advanced", label: "Advanced" })
         return t
@@ -268,6 +265,9 @@ Panel {
     // `asusctl slash get`; slashModeIndex is an index into that same list,
     // which is why the two are never mixed with a hardcoded table (see Model.js).
     property var slashModes: []
+    // `slash list` came back empty on a laptop that has a ledbar: asusctl is
+    // older than 6.3.9 (the slash subcommands do not exist there).
+    property bool slashListFailed: false
     property bool slashEnabled: false
     property int slashBrightness: 255
     property int slashInterval: 0
@@ -413,12 +413,12 @@ Panel {
     // asusctl 6.4 stores a written value for the PPT/NVIDIA tuning attributes
     // but only ever applies it once profile tuning is enabled ("PPT config
     // updated and will be applied when tuning is enabled") — silently
-    // otherwise. Enabling tuning inline here keeps these sliders doing what
-    // the click promised, same as before that gate existed.
+    // otherwise. Tuning is enabled here only if `asusctl profile tuning`
+    // reports it off, so a slider drag does not rewrite it on every move.
     readonly property var tuningGatedAttrs: ["ppt_pl1_spl", "ppt_pl2_sppt", "ppt_pl3_fppt", "nv_dynamic_boost", "nv_temp_target", "nv_tgp"]
     function setArmouryAttr(a, v) {
         actionProc.command = root.tuningGatedAttrs.indexOf(a) >= 0
-            ? ["sh", "-c", "asusctl profile tuning true && asusctl armoury set " + a + " " + String(v)]
+            ? ["sh", "-c", "(asusctl profile tuning | grep -q true || asusctl profile tuning true) && asusctl armoury set \"$1\" \"$2\"", "sh", a, String(v)]
             : ["asusctl", "armoury", "set", a, String(v)]
         actionProc.running = true
     }
@@ -842,14 +842,12 @@ Panel {
                     visible: root.tabKey === "slash"
                     width: parent.width
                     spacing: Style.space(6)
-                    enabled: root.supported.hasSlash
-                    opacity: enabled ? 1 : 0.4
 
                         Row { width: parent.width
                             Text { text: "SLASH LEDBAR"; color: root.bar.foreground; font.family: root.bar.fontFamily; font.pixelSize: Style.font.subtitle; font.bold: true; anchors.verticalCenter: parent.verticalCenter; width: parent.width - slashSw.width - Style.space(8) }
                             Row { id: slashSw; spacing: Style.space(4); anchors.verticalCenter: parent.verticalCenter
                                 Rectangle { width: Style.space(14); height: Style.space(14); radius: Style.space(7); color: root.slashEnabled ? "#44cc44" : "#cc4444"; anchors.verticalCenter: parent.verticalCenter
-                                    SequentialAnimation on opacity { running: root.slashEnabled && slashSection.enabled; loops: Animation.Infinite; NumberAnimation { from: 1; to: 0.5; duration: 800 } NumberAnimation { from: 0.5; to: 1; duration: 800 } }
+                                    SequentialAnimation on opacity { running: root.slashEnabled; loops: Animation.Infinite; NumberAnimation { from: 1; to: 0.5; duration: 800 } NumberAnimation { from: 0.5; to: 1; duration: 800 } }
                                 }
                                 Text { text: root.slashEnabled ? "ON" : "OFF"; color: root.slashEnabled ? "#44cc44" : "#cc4444"; font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
                                 MouseArea { id: slashPowerMouse; width: Style.space(40); height: Style.space(20); anchors.verticalCenter: parent.verticalCenter; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.setSlashEnabled(!root.slashEnabled)
@@ -858,15 +856,14 @@ Panel {
                             }
                         }
 
-                        // Says why the controls below are dead. Held back
-                        // until infoLoaded so a laptop that does have a ledbar
-                        // is not told otherwise during the first read.
+                        // Slash subcommands (list/get/set) arrived in asusctl 6.3.9;
+                        // on anything older the grid would just sit empty.
                         Text {
-                            visible: root.infoLoaded && !root.supported.hasSlash
+                            visible: root.slashListFailed
                             width: parent.width
-                            text: "This laptop has no Slash ledbar — asusctl reports no Slash device."
+                            text: "Slash control needs asusctl 6.3.9 or later — `asusctl slash list` returned no modes. Update asusctl."
                             wrapMode: Text.WordWrap
-                            color: Qt.darker(root.bar.foreground, 1.5)
+                            color: "#cc4444"
                             font.family: root.bar.fontFamily
                             font.pixelSize: Style.font.caption
                         }
@@ -1169,12 +1166,7 @@ Panel {
         // Kick the slash reads here rather than waiting for the next refresh:
         // hasSlash is only known once this has landed, so the first refresh
         // always skipped them and the section stayed blank for a full tick.
-        //
-        // The mode list is fetched whatever this laptop supports, because the
-        // greyed-out section still shows the grid — a laptop without a ledbar
-        // is told what it is missing rather than shown an empty box. The state
-        // read is the one that needs a device to answer it.
-        if (root.slashModes.length === 0 && !slashListProc.running) slashListProc.running = true
+        if (root.supported.hasSlash && root.slashModes.length === 0 && !slashListProc.running) slashListProc.running = true
         if (root.supported.hasSlash && !slashStateProc.running) slashStateProc.running = true
     } } }
     Process { id: batteryProc; command: ["asusctl", "battery", "info"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.batteryLimit = Model.parseBatteryInfo(text).limit } } }
@@ -1182,7 +1174,7 @@ Panel {
     // Fetched once — the animation list is a property of the asusctl build,
     // not of anything that changes while the bar is running, and not of
     // whether this particular laptop has a ledbar to play them on.
-    Process { id: slashListProc; command: Model.slashListCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.slashModes = Model.parseSlashModes(text) } } }
+    Process { id: slashListProc; command: Model.slashListCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.slashModes = Model.parseSlashModes(text); root.slashListFailed = root.slashModes.length === 0 } } }
     Process { id: slashStateProc; command: Model.slashStateCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
         var st = Model.parseSlashState(text, root.slashModes)
         // A call that returned nothing leaves the last known state alone: the

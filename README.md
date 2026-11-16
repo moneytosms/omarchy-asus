@@ -46,9 +46,8 @@ that.
   twelve, plus brightness and the awake/boot/sleep power states.
 - **Slash** — the lid ledbar on Zephyrus models: every animation `asusctl`
   lists, an animated preview strip that plays whichever one you point at, an
-  on/off pair, a 0–255 brightness slider, and the animation interval. On a
-  laptop without a ledbar the tab is still there but greyed out and says so,
-  rather than vanishing.
+  on/off pair, a 0–255 brightness slider, and the animation interval. The
+  tab is hidden on laptops without a ledbar. Needs asusctl 6.3.9+.
 - **Fan** — a master "Custom Fan Curves" switch, a per-profile curve editor
   (curves are stored per power profile, so you pick which profile you are
   tuning), draggable curves per fan (CPU/GPU, plus Mid on laptops with a third
@@ -173,6 +172,8 @@ sudo pacman -S asusctl
 sudo systemctl enable --now asusd.service
 ```
 
+The Slash tab needs **asusctl 6.3.9 or later**; everything else works on 6.x.
+
 ## Install
 
 ```bash
@@ -205,9 +206,10 @@ block in `~/.config/omarchy/shell.json`, which Omarchy drops with the plugin.
 Works with any laptop `asusctl` supports (ROG, TUF, ProArt, Zenbook). Every
 section — RGB effects, fan curves, individual firmware attributes — is gated
 on what `asusctl` reports for your specific model; unsupported controls don't
-appear rather than sitting there doing nothing. The Slash ledbar is the one
-exception: it is shown greyed out on hardware without one, since it is a
-feature the Zephyrus line is known for and a silent omission reads as a bug.
+appear rather than sitting there doing nothing — the Slash tab included, which
+only shows on laptops with a ledbar. Slash needs **asusctl 6.3.9 or later**
+(the `slash list/get/set` subcommands); on an older build the tab says so
+instead of showing an empty grid.
 
 ## Troubleshooting
 

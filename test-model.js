@@ -364,4 +364,10 @@ assert.equal(M.parseBoostState("").available, false)
 assert.deepEqual(M.boostCommand(false), ["pkexec", "/usr/local/bin/omarchy-asus-boost", "off"])
 assert.deepEqual(M.boostCommand(true), ["pkexec", "/usr/local/bin/omarchy-asus-boost", "on"])
 
+assert.equal(M.boostErrorText(0, ""), "")
+assert.ok(/dismissed/.test(M.boostErrorText(126, "")))
+assert.ok(/not authorised/.test(M.boostErrorText(127, "")))
+assert.equal(M.boostErrorText(2, "x\nno CPU boost control on this machine\n"), "CPU boost change failed (exit 2): no CPU boost control on this machine")
+assert.equal(M.boostErrorText(1, ""), "CPU boost change failed (exit 1).")
+
 console.log("ok - all Model.js checks passed")

@@ -656,6 +656,16 @@ function parseBoostState(raw) {
 
 // pkexec runs the root-owned helper; the polkit action allows the active
 // local session without a password. Only "on"/"off" are ever sent.
+// "" on success, otherwise a message for the panel: a failed boost change must
+// be visible, never swallowed. pkexec exits 126 when the auth dialog was
+// dismissed and 127 when not authorised.
+function boostErrorText(code, stderr) {
+    if (code === 0) return ""
+    var why = String(stderr || "").trim().split("\n").pop()
+    if (code === 126) return "CPU boost not changed: authentication was dismissed."
+    if (code === 127) return "CPU boost not changed: not authorised (re-run boost/install.sh)."
+    return "CPU boost change failed (exit " + code + ")" + (why ? ": " + why : ".")
+}
 function boostCommand(on) { return ["pkexec", boostHelper, on ? "on" : "off"] }
 
 // ============================================================

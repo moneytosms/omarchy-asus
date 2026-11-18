@@ -316,6 +316,7 @@ Panel {
     // CPU boost: read straight from sysfs; writes go through the optional
     // root helper in boost/ (installed once with boost/install.sh).
     property var boost: ({ available: false, enabled: true, helper: false })
+    property string boostError: ""
     property int pptPl1: 115
     property int pptPl1Min: 25
     property int pptPl1Max: 45
@@ -357,7 +358,7 @@ Panel {
         if (supported.hasFanCurve) { if (!fanDetailProc.running) fanDetailProc.running = true }
     }
 
-    function setBoost(on) { if (!boost.available || !boost.helper || boostActionProc.running) return; boost = { available: true, enabled: on, helper: true }; boostActionProc.command = Model.boostCommand(on); boostActionProc.running = true }
+    function setBoost(on) { if (!boost.available || !boost.helper || boostActionProc.running) return; boostError = ""; boost = { available: true, enabled: on, helper: true }; boostActionProc.command = Model.boostCommand(on); boostActionProc.running = true }
     function setProfile(p) { if (!p || actionProc.running) return; actionProc.command = Model.profileCommand(p, UPower.onBattery); actionProc.running = true }
     function cycleProfile(d) { profileIndex = Model.selectProfileIndex(profileIndex, d, profiles); setProfile(profiles[profileIndex]) }
 
@@ -1112,7 +1113,8 @@ Panel {
                             Button { enabled: root.boost.helper; width: (parent.width - Style.space(72) - Style.space(4) * 2) / 2; text: "On"; tooltipText: "Let the CPU turbo above its base clock.\nRemembered across reboots."; fontSize: Style.font.caption; foreground: root.bar.foreground; fontFamily: root.bar.fontFamily; horizontalPadding: Style.spacing.controlPaddingX; verticalPadding: Style.spacing.controlPaddingY; bordered: true; active: root.boost.enabled; onClicked: root.setBoost(true) }
                             Button { enabled: root.boost.helper; width: (parent.width - Style.space(72) - Style.space(4) * 2) / 2; text: "Off"; tooltipText: "Cap the CPU at its base clock: cooler, quieter,\nbetter battery life. Remembered across reboots."; fontSize: Style.font.caption; foreground: root.bar.foreground; fontFamily: root.bar.fontFamily; horizontalPadding: Style.spacing.controlPaddingX; verticalPadding: Style.spacing.controlPaddingY; bordered: true; active: !root.boost.enabled; onClicked: root.setBoost(false) }
                         }
-                        Text { visible: !root.boost.helper; width: parent.width; text: "Changing CPU boost needs a one-time setup: run `sh boost/install.sh` in the plugin folder."; wrapMode: Text.WordWrap; color: "#cc9944"; font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption }
+                        Text { visible: root.boostError !== ""; width: parent.width; text: root.boostError; wrapMode: Text.WordWrap; color: "#cc4444"; font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption }
+                        Text { visible: !root.boost.helper; width: parent.width; text: "Changing CPU boost needs a one-time setup: run `sh ~/.config/omarchy/plugins/io.github.moneytosms.asus/boost/install.sh`."; wrapMode: Text.WordWrap; color: "#cc9944"; font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption }
                     }
                     Column { visible: root.armourySupported.pptPl1 || root.armourySupported.pptPl2; width: parent.width; spacing: Style.space(4)
                         Text { text: "CPU Power"; color: Qt.darker(root.bar.foreground, 1.4); font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
@@ -1184,7 +1186,8 @@ Panel {
     } } }
     Process { id: boostProc; command: Model.boostStatusCommand(); stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.boost = Model.parseBoostState(text) } } }
     // Re-read afterwards so a dismissed or failed auth leaves the UI showing the real state.
-    Process { id: boostActionProc; onExited: function() { if (!boostProc.running) boostProc.running = true } }
+    Process { id: boostActionProc; stderr: StdioCollector { id: boostErr; waitForEnd: true }
+        onExited: function(code) { root.boostError = Model.boostErrorText(code, boostErr.text); if (!boostProc.running) boostProc.running = true } }
     Process { id: batteryProc; command: ["asusctl", "battery", "info"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.batteryLimit = Model.parseBatteryInfo(text).limit } } }
     Process { id: ledProc; command: ["asusctl", "leds", "get"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { root.ledBrightness = Model.parseLedBrightness(text) } } }
     // Fetched once — the animation list is a property of the asusctl build,

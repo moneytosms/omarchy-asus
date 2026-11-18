@@ -630,6 +630,35 @@ function slashPreviewLevels(anim, phase, n) {
 }
 
 // ============================================================
+// CPU boost (optional root helper in boost/, see README)
+// ============================================================
+var boostHelper = "/usr/local/bin/omarchy-asus-boost"
+
+// Reading needs no root, so the toggle shows the real state even before the
+// helper is installed. Prints "intel 0|1" (no_turbo, 1 = boost off),
+// "cpufreq 0|1" (boost, 1 = boost on) or "none", then "helper" if installed.
+function boostStatusCommand() {
+    return ["sh", "-c",
+        'a=/sys/devices/system/cpu/intel_pstate/no_turbo; b=/sys/devices/system/cpu/cpufreq/boost; ' +
+        'if [ -r "$a" ]; then echo "intel $(cat "$a")"; elif [ -r "$b" ]; then echo "cpufreq $(cat "$b")"; else echo none; fi; ' +
+        '[ -x "$1" ] && echo helper; true', "sh", boostHelper]
+}
+
+function parseBoostState(raw) {
+    var text = String(raw || "")
+    var r = { available: false, enabled: true, helper: /^helper$/m.test(text) }
+    var m = text.match(/^(intel|cpufreq) ([01])$/m)
+    if (!m) return r
+    r.available = true
+    r.enabled = m[1] === "intel" ? m[2] === "0" : m[2] === "1"
+    return r
+}
+
+// pkexec runs the root-owned helper; the polkit action allows the active
+// local session without a password. Only "on"/"off" are ever sent.
+function boostCommand(on) { return ["pkexec", boostHelper, on ? "on" : "off"] }
+
+// ============================================================
 // Color helpers
 // ============================================================
 function rgbToHex(r, g, b) {

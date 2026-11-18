@@ -56,7 +56,8 @@ that.
 - **Advanced** — firmware power limits (PL1/PL2, GPU dynamic boost, GPU temp
   target) with ranges read from the firmware and a "Defaults" button that
   replays the values `asusctl` reports as default. Each control appears only
-  if `asusctl armoury list` says your laptop exposes it.
+  if `asusctl armoury list` says your laptop exposes it. Also a **CPU Boost**
+  on/off switch (see [CPU boost](#cpu-boost)).
 - **Bar icon** — scroll over it to cycle performance modes without opening the
   panel.
 
@@ -128,6 +129,24 @@ bands actually spread outwards from the centre. If you own one of these
 laptops, checking a guessed mode and correcting its entry is the single most
 useful contribution to this tab.
 
+### CPU boost
+
+`asusctl` has no CPU boost control, and the kernel switch
+(`intel_pstate/no_turbo`, or `cpufreq/boost` on AMD / acpi-cpufreq) is
+root-only and resets every boot. The panel always **shows** the real state, but
+changing it needs a one-time, opt-in root setup:
+
+```bash
+sh boost/install.sh            # from the plugin folder; asks for sudo
+sh boost/install.sh --remove   # undo
+```
+
+This installs `/usr/local/bin/omarchy-asus-boost` (takes only `on`/`off`, no
+paths), a polkit action that lets the active local session run it without a
+password, and a boot unit that re-applies the saved state. The choice is
+persisted in `/var/lib/omarchy-asus/cpu-boost` (present = boost off), so it
+survives reboots. Without the setup the On/Off buttons stay greyed out.
+
 ### Screen refresh rate
 
 `asusctl` has no display controls, so the refresh buttons drive Hyprland
@@ -189,8 +208,10 @@ and enable it via the Omarchy plugin menu.
 omarchy plugin remove io.github.moneytosms.asus
 ```
 
-Nothing is written outside the plugin folder and the plugin's own settings
-block in `~/.config/omarchy/shell.json`, which Omarchy drops with the plugin.
+Unless you ran the optional CPU boost setup, nothing is written outside the
+plugin folder and the plugin's own settings block in
+`~/.config/omarchy/shell.json`, which Omarchy drops with the plugin. If you did,
+run `sh boost/install.sh --remove` first.
 
 ## Configuration
 

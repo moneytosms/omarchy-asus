@@ -1,0 +1,9 @@
+[Unit]
+Description=Re-apply saved CPU boost setting (omarchy-asus)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/omarchy-asus-boost apply
+
+[Install]
+WantedBy=multi-user.target

@@ -354,4 +354,14 @@ sm.filter(function(n) { return M.slashModeDef(n).anim !== "static" }).forEach(fu
     assert.ok(frames.size > 1, anim + " does not animate")
 })
 
+// CPU boost: intel no_turbo is inverted (1 = off), cpufreq/boost is not.
+assert.deepEqual(M.parseBoostState("intel 0\nhelper\n"), { available: true, enabled: true, helper: true })
+assert.deepEqual(M.parseBoostState("intel 1\n"), { available: true, enabled: false, helper: false })
+assert.deepEqual(M.parseBoostState("cpufreq 1\nhelper\n"), { available: true, enabled: true, helper: true })
+assert.deepEqual(M.parseBoostState("cpufreq 0\n"), { available: true, enabled: false, helper: false })
+assert.equal(M.parseBoostState("none\nhelper\n").available, false)
+assert.equal(M.parseBoostState("").available, false)
+assert.deepEqual(M.boostCommand(false), ["pkexec", "/usr/local/bin/omarchy-asus-boost", "off"])
+assert.deepEqual(M.boostCommand(true), ["pkexec", "/usr/local/bin/omarchy-asus-boost", "on"])
+
 console.log("ok - all Model.js checks passed")

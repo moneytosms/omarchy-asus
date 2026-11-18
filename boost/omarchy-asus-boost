@@ -1,0 +1,38 @@
+#!/bin/sh
+# CPU boost control. Usage: omarchy-asus-boost status|on|off|apply
+# Runs as root via pkexec (on/off) and at boot via the systemd unit (apply).
+# Persisted state: /var/lib/omarchy-asus/cpu-boost holds "off" while boost is
+# disabled and is absent while it is enabled, so a missing file = firmware default.
+set -eu
+
+# Test hook only: ignored as root, so pkexec/systemd can never be redirected.
+[ "$(id -u)" -eq 0 ] && OMARCHY_ASUS_BOOST_ROOT=
+R=${OMARCHY_ASUS_BOOST_ROOT:-}
+NO_TURBO=$R/sys/devices/system/cpu/intel_pstate/no_turbo   # 1 = boost off
+BOOST=$R/sys/devices/system/cpu/cpufreq/boost              # 1 = boost on (AMD, acpi-cpufreq)
+STATE=$R/var/lib/omarchy-asus/cpu-boost
+
+# Echo on|off, or exit 2 when this CPU has no boost switch.
+status() {
+    if [ -e "$NO_TURBO" ]; then [ "$(cat "$NO_TURBO")" = 1 ] && echo off || echo on
+    elif [ -e "$BOOST" ]; then [ "$(cat "$BOOST")" = 1 ] && echo on || echo off
+    else echo unsupported; return 2; fi
+}
+
+write() { # $1 = on|off
+    if [ -e "$NO_TURBO" ]; then [ "$1" = on ] && echo 0 > "$NO_TURBO" || echo 1 > "$NO_TURBO"
+    elif [ -e "$BOOST" ]; then [ "$1" = on ] && echo 1 > "$BOOST" || echo 0 > "$BOOST"
+    else echo "no CPU boost control on this machine" >&2; exit 2; fi
+}
+
+case "${1:-}" in
+    status) status ;;
+    on)  write on;  rm -f "$STATE" ;;
+    off) write off; mkdir -p "$(dirname "$STATE")"; echo off > "$STATE" ;;
+    apply)
+        [ -f "$STATE" ] || exit 0
+        # amd/acpi-cpufreq can register after this unit starts: wait briefly.
+        i=0; while [ ! -e "$NO_TURBO" ] && [ ! -e "$BOOST" ] && [ $i -lt 20 ]; do sleep 0.5; i=$((i+1)); done
+        write off ;;
+    *) echo "usage: ${0##*/} status|on|off|apply" >&2; exit 64 ;;
+esac

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.moneytosms.asus",
   "name": "ASUS",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "author": "moneytosms",
   "license": "MIT",
   "homepage": "https://github.com/moneytosms/omarchy-asus",
